@@ -30,6 +30,7 @@ var sourceKeys = map[string]string{
 	"命令分组 ":    "ui_03b7c7f1ce7f",
 	"请先在模型页面配置并选择模型":                      "ui_03d9cc8321d5",
 	"Markdown 预览超过 2 MB 限制，可用“系统打开”查看全文。": "ui_040563c9c5bb",
+	"新建标签":      "ui_040692852ad5",
 	"技能 %s 已%s": "ui_04b1771449dd",
 	"Endpoint 不是有效的 URL，无法推导模型列表地址": "ui_04bb32e64797",
 	"推理标签": "ui_04fa392807f4",

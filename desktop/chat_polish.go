@@ -133,13 +133,7 @@ func (a *desktop) globalShortcuts(c *ui.Context) {
 	}
 	c.OnShortcut(ui.Ctrl|ui.Shift, ui.KeyF12, a.exportMemoryDiagnostics)
 	c.OnShortcut(ui.Cmd, ui.KeyN, a.newSession)
-	c.OnShortcut(ui.Cmd, ui.KeyT, func() {
-		root := a.config.Workspace
-		if t := a.current(); t != nil && !tempWorkspace(t.Workspace) {
-			root = t.Workspace
-		}
-		a.newConversation(root)
-	})
+	c.OnShortcut(ui.Cmd, ui.KeyT, a.newConversationTab)
 	c.OnShortcut(ui.Cmd, ui.KeyW, func() { a.closeWorkspaceTab(a.active) })
 	// Find in the transcript, as Ctrl+F finds in an editor. While the file panel
 	// shows an editor, that editor owns the key: its bar is built over the code,

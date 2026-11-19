@@ -833,7 +833,7 @@ func (a *desktop) retryBanner(c *ui.Context, info *retryInfo) {
 func (a *desktop) composerInfoBar(c *ui.Context, t *conversation) {
 	p := a.currentPalette()
 	ui.Row(c).FillWidth().MinWidth(0).Gap(2).AlignItems(ui.Center).Children(func() {
-		addButton(c, "composer-new", locales.Text("新建会话"), "plus", 26, func() { a.newSession() })
+		addButton(c, "composer-new", locales.Text("新建会话，清空上下文"), "plus", 26, func() { a.newSession() })
 		iconAction(c, "composer-sessions", locales.Text("查看和切换历史会话"), "menu", 26, func() {
 			a.toggleSessionsMenu(t)
 		}).KeepFocus().TextColor(p.muted)

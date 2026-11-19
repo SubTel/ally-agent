@@ -225,15 +225,9 @@ func (a *desktop) fileTree(c *ui.Context) {
 			})
 		})
 		ui.Row(c).Height(26).BorderWidth(1, 0, 0, 0).BorderColor(c.Theme().Border).Padding(0, padRow).Children(func() {
-			uikit.IconButton(c, "explorer-open", locales.Text("在文件管理器中打开工作区"), iconImage("folderopen"), 22, uikit.IconQuiet, func() {
-				if t := a.current(); t != nil {
-					p := t.Workspace
-					a.job(func() error { return a.core.OpenPathInFileManager(p) })
-				}
-			}, ink)
 			ui.Spacer(c)
 			uikit.IconButton(c, "explorer-help", locales.Text("文件浏览器帮助"), iconImage("info"), 22, uikit.IconQuiet, func() { a.filesF.HelpOpen = !a.filesF.HelpOpen }, ink)
-			addButton(c, "explorer-new-file", locales.Text("新建文件"), "plus", 22, func() { a.openFilePrompt(false, "") })
+			addButton(c, "explorer-new-file", locales.Text("新建文件"), "fileadd", 22, func() { a.openFilePrompt(false, "") })
 		})
 	})
 	a.filePromptDialog(c)

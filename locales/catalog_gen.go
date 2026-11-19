@@ -17175,3 +17175,13 @@ func Ui7304e809e016() string { return In(i18n.Locale()).Ui7304e809e016() }
 func (msgs Messages) Ui7304e809e016() string {
 	return Catalog.Format(msgs.locale, "ui_7304e809e016", nil)
 }
+
+// Ui040692852ad5 says "New tab"
+// in the language the app shows.
+func Ui040692852ad5() string { return In(i18n.Locale()).Ui040692852ad5() }
+
+// Ui040692852ad5 says "New tab"
+// in the language of msgs.
+func (msgs Messages) Ui040692852ad5() string {
+	return Catalog.Format(msgs.locale, "ui_040692852ad5", nil)
+}
