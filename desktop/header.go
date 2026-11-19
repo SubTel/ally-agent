@@ -217,12 +217,10 @@ func (a *desktop) workspaceTabs(c *ui.Context) {
 						s.pressID = ""
 					}
 				}
-				// The plus closes the strip, right where the tabs end: it asks for
-				// another workspace and opens the same history the header's add
-				// button does — one menu, built by whichever entry opened it.
-				a.workspaceHistoryMenu(c.Key("tabs-workspace-add"), func(b ui.Element) {
-					uikit.IconButtonOn(c, b.Disabled(!a.ready), locales.Text("打开工作区历史"), iconImage("plus"), 26, 26*uikit.IconGlyphScale, uikit.IconQuiet, a.secondaryInk())
-				}).AlignSelf(ui.Center).MarginStart(4)
+				// The plus closes the strip, right where the tabs end: it opens
+				// another conversation tab in the current workspace, the same as
+				// Ctrl+T. Switching workspaces lives in the header's switcher.
+				iconButtonSized(c, "tabs-new-conversation", locales.Text("新建标签"), "plus", 26, iconQuiet, a.newConversationTab).Disabled(!a.ready).AlignSelf(ui.Center).MarginStart(4)
 			})
 		})
 	})
@@ -381,8 +379,48 @@ func moveOpenConversationTabToIndex(tabs []*conversation, positions []tabPositio
 }
 
 // openWorkspaceEntry opens a workspace every entry point shares: the header
-// menu and the rail's workspace rows both land on this one function.
+// switcher's menu and the rail's workspace rows both land on this one function.
 func (a *desktop) openWorkspaceEntry(workspace string) { a.newConversation(workspace) }
+
+// newConversationTab opens another conversation tab in the workspace the user
+// is working in. The tab strip's plus and Ctrl+T share this one entry.
+func (a *desktop) newConversationTab() {
+	root := a.config.Workspace
+	if t := a.current(); t != nil && !tempWorkspace(t.Workspace) {
+		root = t.Workspace
+	}
+	a.newConversation(root)
+}
+
+// currentWorkspace names what the switcher shows before its menu opens, so the
+// header answers "where am I" without a click.
+func (a *desktop) currentWorkspace() (root, label string) {
+	if t := a.current(); t != nil {
+		return t.Workspace, workspaceLabel(t.Workspace)
+	}
+	return a.config.Workspace, workspaceLabel(a.config.Workspace)
+}
+
+// workspaceSwitcher is the header's only workspace control: it carries the
+// current workspace's name and opens the shared menu, so one control both shows
+// where the user is and offers where to go next.
+func (a *desktop) workspaceSwitcher(c *ui.Context) ui.Element {
+	p := a.currentPalette()
+	root, label := a.currentWorkspace()
+	return a.workspaceHistoryMenu(c.Key("workspace-switch"), func(b ui.Element) {
+		b = b.Disabled(!a.ready).Height(30).Radius(radiusSmall).Padding(0, 8).Gap(gapTight).AlignItems(ui.Center)
+		uikit.Tooltip(c, b, workspaceTip(root)).Label(locales.Text("工作区") + "：" + label).Cursor(ui.CursorPointer)
+		color, fill := a.secondaryInk(), ui.Transparent
+		if b.Hovered() {
+			color, fill = p.text, p.hover
+		}
+		color = fadeColor(b, "ws-ink", color)
+		b.Background(fadeColor(b, "ws-fill", fill)).Children(func() {
+			ui.Text(c, short(label, 18)).FontSize(fsSmall).TextColor(color).SingleLine()
+			iconGlyph(c, "chevrondown", sizeCaretInline).TextColor(color)
+		})
+	})
+}
 
 // Both workspace entries share the same menu builder. Their open flags belong
 // to the controls, not global desktop state; MenuBase handles outside presses.
@@ -392,9 +430,12 @@ func (a *desktop) workspaceHistoryMenu(c *ui.Context, trigger func(ui.Element)) 
 		At: ui.AnchorBottomRight, Self: ui.AnchorTopRight, Gap: 6,
 	}, trigger, func(m ui.MenuParts) {
 		// The two entries that create a workspace stay on top while the history
-		// under them scrolls.
+		// under them scrolls. The pinned group also carries the current workspace,
+		// so the menu answers "where am I" before offering where to go next.
 		header := menuPinnedTop(c)
 		header.Children(func() {
+			root, label := a.currentWorkspace()
+			uikit.Tooltip(c, muted(c, locales.Text("当前工作区")+"："+label, fsSmall, a.secondaryInk()).Padding(4, 9), workspaceTip(root))
 			uikit.MenuItem(c, m, "add", locales.Text("＋ 添加工作区"), uikit.MenuItemOptions{}, a.secondaryInk()).OnClick(a.chooseWorkspace)
 			uikit.MenuItem(c, m, "temporary", locales.Text("临时工作区"), uikit.MenuItemOptions{}, a.secondaryInk()).OnClick(func() { a.newConversation("") })
 			divider(c)
@@ -415,9 +456,7 @@ func (a *desktop) workspaceHistoryMenu(c *ui.Context, trigger func(ui.Element)) 
 // headerActions draws the workspace history, explorer and window actions.
 func (a *desktop) headerActions(c *ui.Context) {
 	p := a.currentPalette()
-	a.workspaceHistoryMenu(c.Key("workspace-add"), func(b ui.Element) {
-		addButtonOn(c, b.Disabled(!a.ready), locales.Text("添加工作区"), "addfolder", 30)
-	})
+	a.workspaceSwitcher(c)
 
 	pageOK := a.page == "chat" || strings.HasPrefix(a.page, "plugin:")
 	// The explorer toggle carries the theme colour even while it is off: a muted

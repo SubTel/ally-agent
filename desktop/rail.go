@@ -376,7 +376,7 @@ func (a *desktop) railSessions(c *ui.Context) {
 				a.railSessSearch = railSearchState{}
 			}
 			a.savePrefs()
-		}, func() { a.newSession() }, a.railSessSearch.open, func() {
+		}, nil, a.railSessSearch.open, func() {
 			a.railSessSearch = railSearchToggle(a.railSessSearch)
 			if a.railSessSearch.open && !a.prefs.RailSessionsOpen {
 				a.prefs.RailSessionsOpen = true
@@ -553,7 +553,9 @@ func (a *desktop) railSectionHeader(c *ui.Context, id, label, icon string, open 
 			tone = uikit.IconAccentOn
 		}
 		uikit.IconButtonSized(c, id+"-search", locales.Text("搜索")+" · "+label, iconImage("search"), 22, 20*uikit.IconGlyphScale, tone, search, a.secondaryInk()).Shrink(0)
-		uikit.IconButtonSized(c, id+"-add", tip, iconImage("plus"), 22, 20*uikit.IconGlyphScale, uikit.IconQuiet, add, a.secondaryInk()).Shrink(0)
+		if add != nil {
+			uikit.IconButtonSized(c, id+"-add", tip, iconImage("plus"), 22, 20*uikit.IconGlyphScale, uikit.IconQuiet, add, a.secondaryInk()).Shrink(0)
+		}
 	})
 }
 

@@ -61,11 +61,10 @@ func TestWorkspaceMenuOpensToLeftAndDistinguishesSameNames(t *testing.T) {
 	}
 }
 
-// The add button in the header and the plus beside the last tab open the same
-// menu. A press that switches entries has to leave one panel up: built from
-// inside each entry, the panel of the first one came out closing while the
-// second went up in the same frame, two panels and two nodes of one key.
-func TestWorkspaceMenuSwitchesEntryWithoutTwoPanels(t *testing.T) {
+// The tab strip's plus opens another tab; the workspace menu belongs to the
+// header's switcher alone. Two entries into one panel used to mean a press that
+// switched entries closed one panel while the other went up in the same frame.
+func TestTabStripPlusOpensATabAndTheSwitcherOwnsTheMenu(t *testing.T) {
 	a := &desktop{
 		ready:    true,
 		page:     "chat",
@@ -79,18 +78,22 @@ func TestWorkspaceMenuSwitchesEntryWithoutTwoPanels(t *testing.T) {
 		a.headerBar(c)
 	}, 900, 120)
 
-	if err := tt.Click("打开工作区历史"); err != nil {
+	if err := tt.Click("新建标签"); err != nil {
 		t.Fatalf("the plus beside the last tab: %v", err)
 	}
 	tt.Frame()
-	if _, ok := tt.Find("工作区历史菜单"); !ok {
-		t.Fatalf("no menu under the plus: %v", tt.Texts())
+	if len(a.tabs) != 2 {
+		t.Fatalf("the plus did not open a tab: %d tabs", len(a.tabs))
+	}
+	if a.tabs[1].Workspace != "work" {
+		t.Fatalf("the plus opened %q instead of the current workspace", a.tabs[1].Workspace)
+	}
+	if _, ok := tt.Find("工作区历史菜单"); ok {
+		t.Fatal("the plus opened the workspace menu")
 	}
 
-	// Straight onto the other entry: the menu moves there, one panel and no
-	// duplicate key (a strict Tester panics on one).
-	if err := tt.Click("添加工作区"); err != nil {
-		t.Fatalf("the header's add button: %v", err)
+	if err := tt.Click("工作区：work"); err != nil {
+		t.Fatalf("the header's workspace switcher: %v", err)
 	}
 	tt.Frame()
 	count := 0
@@ -100,9 +103,9 @@ func TestWorkspaceMenuSwitchesEntryWithoutTwoPanels(t *testing.T) {
 		}
 	}
 	if count != 1 {
-		t.Fatalf("switching triggers left %d menus visible: %v", count, tt.Texts())
+		t.Fatalf("the switcher left %d menus visible: %v", count, tt.Texts())
 	}
 	if _, ok := tt.Find("工作区历史菜单"); !ok {
-		t.Fatalf("no menu under the add button: %v", tt.Texts())
+		t.Fatalf("no menu under the switcher: %v", tt.Texts())
 	}
 }
