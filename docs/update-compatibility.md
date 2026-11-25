@@ -33,12 +33,51 @@ Linux 继续提供版本检测和手动下载，未宣称具备自动替换能�
 
 先构建和上传完整资产，再公开 Release，避免旧客户端从 Atom 发现新版本却下载到 404。
 
-1. 将版本 tag 指向已提交的 MyGo 代码。推送 `v*` tag 会触发构建；也可在 Actions 手动运行并填写已存在的稳定 tag。
+1. 将版本 tag 指向已提交的 MyGo 代码，然后在 Actions 里对 `mygo` 分支手动运行本工作流并填写该 tag（也可用 API：`POST /repos/{owner}/{repo}/actions/workflows/build.yml/dispatches`，`ref` 填 `mygo`，`inputs.tag` 填 tag）。不提供 tag 推送触发：tag 运行的缓存作用域是 tag 本身，只能读到默认分支的缓存，等于每次都把六个架构从零编一遍；在分支上运行才能复用上次的编译产物。
 2. 如需自定义发行说明，提前为同一个 tag 保存 GitHub Release 草稿。CI 保留草稿正文；没有草稿时自动创建并生成说明，正文随各平台包嵌入。
 3. CI 构建七个包，上传到草稿，并校验每个资产的名称、上传状态和大小。任一构建/上传/校验失败，Release 保持草稿，修正后可重跑。
 4. 全部成功才公开为稳定版和 latest。不要提前手动发布空 Release；新流程不再监听 `release:published`。已公开版本拒绝覆盖，修正已发版本应使用更高 tag。
 
 tag 使用 `v1.28.0` 这样的纯数字正式版本，不使用 rc/beta/build 后缀；同一仓库的版本发布串行执行，发布脚本再次检查版本递增。
+
+## 发版命令（参考）
+
+以下命令仅作参考，按实际环境调整；只改 `TAG`，仓库地址从 origin 推导。
+
+```bash
+TAG=v2.3.1                 # 待发布的稳定 tag，必须已存在
+REPO=$(git config --get remote.origin.url | sed -E 's#(git@|https://)github.com[:/]##; s#\.git$##')
+
+# 1. 发版代码先落到 mygo 分支
+git push origin mygo
+
+# 2. 打 tag 并推送。tag 只是版本指针，不再触发构建
+git tag -a "$TAG" -m "Ally $TAG"
+git push origin "$TAG"
+
+# 3. 可选：先建草稿写入发行说明，CI 会保留草稿正文
+#    release.json 自己准备，字段：tag_name、target_commitish=mygo、name、draft=true、body（JSON 转义后的发行说明）
+curl -X POST \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  -H "Content-Type: application/json" \
+  "https://api.github.com/repos/$REPO/releases" \
+  -d @release.json
+
+# 4. 触发发布。ref 必须是分支 mygo，否则拿不到编译缓存
+curl -X POST \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  -H "Content-Type: application/json" \
+  "https://api.github.com/repos/$REPO/actions/workflows/build.yml/dispatches" \
+  -d "{\"ref\":\"mygo\",\"inputs\":{\"tag\":\"$TAG\"}}"
+
+# 5. 看运行进度；也可以用 gh workflow run build.yml --ref mygo -f tag=$TAG
+curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+  "https://api.github.com/repos/$REPO/actions/runs?per_page=1"
+```
+
+CI 跑完自行公开 Release，不需要再点发布；失败时 Release 留在草稿，修完重跑第 4 步即可（同一个 tag 可重复 dispatch）。
 
 本机在 macOS 构建发行包也必须显式提供版本，例如 `BUILD_TAG=v1.28.0 bash scripts/build-all.sh`；缺失或不稳定的 tag 会在编译前被拒绝，避免误打包开发版 `0.1.0`。
 

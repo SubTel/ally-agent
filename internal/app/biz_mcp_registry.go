@@ -349,7 +349,13 @@ func (m *McpManager) toolCatalog(canSearch bool) string {
 	var catalog strings.Builder
 	server := ""
 	for _, tool := range m.collectToolsLocked(true) {
+		if catalog.Len() > AutomaticContextBudgetBytes {
+			break // Keep an over-budget preview; the request guard refuses it.
+		}
 		if tool.ServerName != server {
+			if catalog.Len() > 0 {
+				catalog.WriteString("\n")
+			}
 			server = tool.ServerName
 			fmt.Fprintf(&catalog, "[%s]\n", html.EscapeString(mcpServerID(server)))
 		}
@@ -357,7 +363,10 @@ func (m *McpManager) toolCatalog(canSearch bool) string {
 		if description == "" {
 			description = strings.Join(strings.Fields(tool.Title), " ")
 		}
-		fmt.Fprintf(&catalog, "%s: %s\n", catalogToolName(tool.Name), html.EscapeString(shortMcpDescription(description)))
+		// The bullet is a display-only list marker: it keeps tool rows distinct
+		// from the "[server]" group headers and never enters the
+		// server_id.tool_name ID the model passes to ToolExec.
+		appendAutomaticContextText(&catalog, fmt.Sprintf("- %s: %s\n", catalogToolName(tool.Name), html.EscapeString(shortMcpDescription(description))))
 	}
 	m.catalog = mcpCatalogContent(catalog.String(), true)
 	m.catalogExecOnly = mcpCatalogContent(catalog.String(), false)
@@ -410,24 +419,35 @@ func mcpCatalogContent(catalog string, canSearch bool) string {
 
 var emptyMcpCatalog = mcpCatalogContent("", false)
 
-func (a *App) appendMcpCatalog(ctx context.Context, cfg ConfigState, messages []openai.ChatCompletionMessage, force bool) []openai.ChatCompletionMessage {
-	content := emptyMcpCatalog
-	if !builtinToolDisabled(ctx, cfg, mcpExecName) {
-		if manager := a.activeMcpManager(); manager != nil {
-			content = manager.toolCatalog(!builtinToolDisabled(ctx, cfg, mcpSearchName))
-		}
+// mcpCatalogFor returns the catalog notice a conversation gets when it carries
+// none yet, under cfg's tool settings: the enabled MCP pool, or the empty notice
+// when ToolExec is off or no server is connected. Request assembly and the
+// context breakdown both come through here instead of keeping a second copy of
+// the rule.
+func (a *App) mcpCatalogFor(ctx context.Context, cfg ConfigState) string {
+	if !cfg.ContextEnabled("mcp_catalog") || builtinToolDisabled(ctx, cfg, mcpExecName) {
+		return emptyMcpCatalog
 	}
-	var hadCatalog bool
+	manager := a.activeMcpManager()
+	if manager == nil {
+		return emptyMcpCatalog
+	}
+	return manager.toolCatalog(!builtinToolDisabled(ctx, cfg, mcpSearchName))
+}
+
+// ensureMcpCatalog appends the MCP catalog notice when the message list carries
+// none. The catalog goes out once per conversation: a later config change does
+// not append another copy, so history keeps exactly the directory the model was
+// first given and the request prefix stays byte-stable. Compaction rewrites the
+// history without it, and that is the only thing that re-sends a fresh one.
+func (a *App) ensureMcpCatalog(ctx context.Context, cfg ConfigState, messages []openai.ChatCompletionMessage) []openai.ChatCompletionMessage {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if isMcpCatalogMessage(messages[i]) {
-			hadCatalog = true
-			if !force && messages[i].Content == content {
-				return messages
-			}
-			break
+			return messages
 		}
 	}
-	if content == emptyMcpCatalog && !hadCatalog {
+	content := a.mcpCatalogFor(ctx, cfg)
+	if content == emptyMcpCatalog {
 		return messages
 	}
 	return append(messages, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleUser, Content: content})
