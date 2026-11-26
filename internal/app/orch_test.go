@@ -26,7 +26,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"ally-dev/internal/tools/grep"
 	"ally-dev/internal/tools/toolcall"
 	openai "github.com/sashabaranov/go-openai"
 )
@@ -281,8 +280,8 @@ func TestEditToolSchemaIsBatchChangesOnly(t *testing.T) {
 	if !ok {
 		t.Fatalf("edit schema properties missing: %#v", params)
 	}
-	if len(properties) != 4 || properties["path"] == nil || properties["version"] == nil || properties["changes"] == nil || properties["stage"] == nil {
-		t.Fatalf("edit should expose flat path/version/changes plus scheduling stage: %#v", properties)
+	if len(properties) != 3 || properties["path"] == nil || properties["changes"] == nil || properties["stage"] == nil {
+		t.Fatalf("edit should expose flat path/changes plus scheduling stage: %#v", properties)
 	}
 	for _, legacy := range []string{"files", "oldString", "newString", "replaceAll", "edits", "startLine", "endLine", "newText"} {
 		if _, exists := properties[legacy]; exists {
@@ -293,7 +292,7 @@ func TestEditToolSchemaIsBatchChangesOnly(t *testing.T) {
 	if !ok {
 		t.Fatalf("unexpected edit required type %T", params["required"])
 	}
-	wantRequired := map[string]bool{"path": true, "version": true, "changes": true}
+	wantRequired := map[string]bool{"path": true, "changes": true}
 	if len(required) != len(wantRequired) {
 		t.Fatalf("unexpected required fields: %#v", required)
 	}
@@ -321,7 +320,7 @@ func TestEditToolSchemaIsBatchChangesOnly(t *testing.T) {
 	if !ok {
 		t.Fatalf("remote_edit schema properties missing: %#v", remoteParams)
 	}
-	for _, name := range []string{"alias", "path", "version", "changes"} {
+	for _, name := range []string{"alias", "path", "changes"} {
 		if _, exists := remoteProperties[name]; !exists {
 			t.Fatalf("remote_edit schema missing %s", name)
 		}
@@ -335,7 +334,7 @@ func TestEditToolSchemaIsBatchChangesOnly(t *testing.T) {
 	if !ok {
 		t.Fatalf("unexpected remote_edit required type %T", remoteParams["required"])
 	}
-	wantRemoteRequired := map[string]bool{"alias": true, "path": true, "version": true, "changes": true}
+	wantRemoteRequired := map[string]bool{"alias": true, "path": true, "changes": true}
 	if len(remoteRequired) != len(wantRemoteRequired) {
 		t.Fatalf("unexpected remote_edit required fields: %#v", remoteRequired)
 	}
@@ -350,8 +349,8 @@ func TestEditToolSchemaIsBatchChangesOnly(t *testing.T) {
 			t.Fatal("replace_text should not be exposed; edit is the only local edit tool")
 		}
 	}
-	if properties["version"] == nil || properties["expectedMd5"] != nil {
-		t.Fatalf("edit schema must expose version and reject expectedMd5: %#v", properties)
+	if properties["version"] != nil || properties["expectedMd5"] != nil {
+		t.Fatalf("edit schema must reject version and expectedMd5: %#v", properties)
 	}
 	changesSchema, ok := properties["changes"].(map[string]any)
 	if !ok {
@@ -365,14 +364,14 @@ func TestEditToolSchemaIsBatchChangesOnly(t *testing.T) {
 	if !ok {
 		t.Fatalf("edit change properties missing: %#v", items)
 	}
-	for _, field := range []string{"oldText", "lineRange", "replaceAll", "newText"} {
+	for _, field := range []string{"oldText", "replaceAll", "newText"} {
 		if _, exists := changeProperties[field]; !exists {
 			t.Fatalf("edit change schema missing %s: %#v", field, items)
 		}
 	}
 	changeRequired, ok := items["required"].([]string)
-	if !ok || len(changeRequired) != 1 || changeRequired[0] != "newText" {
-		t.Fatalf("edit change must require only newText: %#v", items["required"])
+	if !ok || len(changeRequired) != 2 || !containsString(changeRequired, "oldText") || !containsString(changeRequired, "newText") {
+		t.Fatalf("edit change must require oldText and newText: %#v", items["required"])
 	}
 	for _, keyword := range []string{"oneOf", "anyOf", "allOf", "not"} {
 		if _, exists := items[keyword]; exists {
@@ -396,7 +395,7 @@ func TestDetectWriteBatchConflictsBetweenSeparateMutationCalls(t *testing.T) {
 	// inside one internal plan are merged by planLocalEditBatch instead.
 	calls := []openai.ToolCall{{Function: openai.FunctionCall{
 		Name:      "edit",
-		Arguments: `{"path":"sample.txt","version":"abc123","changes":[{"oldText":"a","newText":"b"}]}`,
+		Arguments: `{"path":"sample.txt","changes":[{"oldText":"a","newText":"b"}]}`,
 	}}}
 	if conflicts := detectWriteBatchConflicts(cfg, calls); len(conflicts) != 0 {
 		t.Fatalf("one local edit call should not conflict with itself, got %#v", conflicts)
@@ -425,8 +424,8 @@ func TestDetectWriteBatchConflictsSkipsLaterSamePathCalls(t *testing.T) {
 	// Two edit calls to one file in one batch: the first executes, the second
 	// is skipped with guidance to re-send after seeing the first result.
 	calls := []openai.ToolCall{
-		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"sample.txt","version":"abc123","changes":[{"oldText":"a","newText":"b"}]}`}},
-		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"./sample.txt","version":"abc123","changes":[{"oldText":"c","newText":"d"}]}`}},
+		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"sample.txt","changes":[{"oldText":"a","newText":"b"}]}`}},
+		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"./sample.txt","changes":[{"oldText":"c","newText":"d"}]}`}},
 	}
 	conflicts := detectWriteBatchConflicts(cfg, calls)
 	if len(conflicts) != 1 {
@@ -447,7 +446,7 @@ func TestDetectWriteBatchConflictsSkipsLaterSamePathCalls(t *testing.T) {
 func TestDetectWriteBatchConflictsNormalizesSamePath(t *testing.T) {
 	cfg := ConfigState{Workspace: t.TempDir()}
 	calls := []openai.ToolCall{
-		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"sample.txt","version":"abc123","changes":[{"oldText":"a","newText":"b"}]}`}},
+		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"sample.txt","changes":[{"oldText":"a","newText":"b"}]}`}},
 		{Function: openai.FunctionCall{Name: "delete", Arguments: `{"paths":["./sample.txt"]}`}},
 		{Function: openai.FunctionCall{Name: "create", Arguments: `{"path":"other.txt"}`}},
 	}
@@ -475,7 +474,7 @@ func TestDetectWriteBatchConflictsSeesSinglePathTools(t *testing.T) {
 	cfg := ConfigState{Workspace: t.TempDir()}
 	calls := []openai.ToolCall{
 		{Function: openai.FunctionCall{Name: "create", Arguments: `{"path":"sample.txt","content":"x"}`}},
-		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"sample.txt","version":"abc123","changes":[{"oldText":"a","newText":"b"}]}`}},
+		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"sample.txt","changes":[{"oldText":"a","newText":"b"}]}`}},
 	}
 	conflicts := detectWriteBatchConflicts(cfg, calls)
 	if len(conflicts) != 1 || toolErrorCode(conflicts[1]) != "E_WRITE_BATCH_CONFLICT" {
@@ -483,8 +482,8 @@ func TestDetectWriteBatchConflictsSeesSinglePathTools(t *testing.T) {
 	}
 
 	remoteCalls := []openai.ToolCall{
-		{Function: openai.FunctionCall{Name: "remote_edit", Arguments: `{"target":"dev:/w","path":"a.txt","version":"abc123","changes":[{"oldText":"a","newText":"b"}]}`}},
-		{Function: openai.FunctionCall{Name: "remote_edit", Arguments: `{"target":"dev:/w","path":"a.txt","version":"abc123","changes":[{"oldText":"a","newText":"c"}]}`}},
+		{Function: openai.FunctionCall{Name: "remote_edit", Arguments: `{"target":"dev:/w","path":"a.txt","changes":[{"oldText":"a","newText":"b"}]}`}},
+		{Function: openai.FunctionCall{Name: "remote_edit", Arguments: `{"target":"dev:/w","path":"a.txt","changes":[{"oldText":"a","newText":"c"}]}`}},
 	}
 	remoteConflicts := detectWriteBatchConflicts(cfg, remoteCalls)
 	if len(remoteConflicts) != 1 || toolErrorCode(remoteConflicts[1]) != "E_WRITE_BATCH_CONFLICT" {
@@ -507,7 +506,7 @@ func TestDetectWriteBatchConflictsCollapsesRepeatWithinOneCall(t *testing.T) {
 		t.Fatalf("a repeated path inside one call is not a batch conflict, got %#v", conflicts)
 	}
 
-	calls = append(calls, openai.ToolCall{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"sample.txt","version":"abc123","changes":[{"oldText":"a","newText":"b"}]}`}})
+	calls = append(calls, openai.ToolCall{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"sample.txt","changes":[{"oldText":"a","newText":"b"}]}`}})
 	conflicts := detectWriteBatchConflicts(cfg, calls)
 	if len(conflicts) != 1 || toolErrorCode(conflicts[1]) != "E_WRITE_BATCH_CONFLICT" {
 		t.Fatalf("the earlier call still owns the path, got %#v", conflicts)
@@ -601,8 +600,8 @@ func TestDetectToolBatchConflictsKeepsOnePlanWriter(t *testing.T) {
 func TestDetectToolBatchConflictsNormalizesToolNameCasing(t *testing.T) {
 	cfg := ConfigState{Workspace: t.TempDir()}
 	calls := []openai.ToolCall{
-		{Function: openai.FunctionCall{Name: "Edit", Arguments: `{"path":"sample.txt","version":"abc123","changes":[{"oldText":"a","newText":"b"}]}`}},
-		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"sample.txt","version":"abc123","changes":[{"oldText":"c","newText":"d"}]}`}},
+		{Function: openai.FunctionCall{Name: "Edit", Arguments: `{"path":"sample.txt","changes":[{"oldText":"a","newText":"b"}]}`}},
+		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"sample.txt","changes":[{"oldText":"c","newText":"d"}]}`}},
 	}
 	conflicts := detectWriteBatchConflicts(cfg, calls)
 	if len(conflicts) != 1 {
@@ -931,323 +930,6 @@ func TestLiveBreakdownAccumulatorMatchesFullRecalculation(t *testing.T) {
 	}
 }
 
-// grep 家族共用一套形状：铺一棵临时目录 → 发一次（或两次）搜索 → 看结果字段。
-// 下面两张表把原来十三个函数收进来，断言逐条照旧，只是不再每个用例重复一遍
-// requireRipgrep / t.TempDir / NewApp 这套开场。
-
-// TestGrepFilesReportsErrors：搜索前的三类入参错误，各自有独立的错误码。
-func TestGrepFilesReportsErrors(t *testing.T) {
-	t.Parallel()
-	requireRipgrep(t)
-	root := t.TempDir()
-	writeToolTestFile(t, root, "sample.txt", "needle\n")
-	app := newIsolatedToolTestApp(t)
-
-	cases := []struct {
-		name     string
-		req      GrepRequest
-		wantCode string
-		wantText string
-	}{
-		{name: "missing search path", req: GrepRequest{Pattern: "needle", Path: "missing"}, wantCode: "E_GREP_PATH"},
-		{name: "invalid regex", req: GrepRequest{Pattern: "["}, wantCode: "E_GREP_REGEX", wantText: "regex"},
-		{name: "invalid glob", req: GrepRequest{Pattern: "needle", Glob: "["}, wantCode: "E_GREP_GLOB", wantText: "glob"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := app.grepFilesWithConfig(context.Background(), ConfigState{Workspace: root}, tc.req)
-			if err == nil {
-				t.Fatalf("expected %s, got no error", tc.wantCode)
-			}
-			if code := toolErrorCode(err); code != tc.wantCode {
-				t.Fatalf("expected %s, got %q (%v)", tc.wantCode, code, err)
-			}
-			if tc.wantText != "" && !strings.Contains(err.Error(), tc.wantText) {
-				t.Fatalf("error should mention %q, got %v", tc.wantText, err)
-			}
-		})
-	}
-}
-
-// TestGrepFilesSearchResults：命中统计、采样截断、包含/排除策略、显式路径覆盖。
-func TestGrepFilesSearchResults(t *testing.T) {
-	t.Parallel()
-	large := strings.Repeat("x", 11*1024*1024) + "\nneedle\n"
-	cases := []struct {
-		name  string
-		files map[string]string
-		check func(t *testing.T, search func(GrepRequest) (*GrepResult, error))
-	}{
-		{name: "hidden directory as the search root", files: map[string]string{
-			".github/workflows/ci.yml": "needle\n",
-		}, check: func(t *testing.T, search func(GrepRequest) (*GrepResult, error)) {
-			got, err := search(GrepRequest{Pattern: "needle", OutputMode: grep.OutputModeLines, Path: ".github"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.MatchedLines != 1 || got.Files != 1 {
-				t.Fatalf("expected one match in hidden search root, got %#v", got)
-			}
-			if len(got.LineHits) != 1 || got.LineHits[0].Path != ".github/workflows/ci.yml" || len(got.LineHits[0].Lines) != 1 || got.LineHits[0].Lines[0] != 1 {
-				t.Fatalf("unexpected lines-mode match %#v", got.LineHits)
-			}
-			// 遍历目录时隐藏条目会被跳过，必须报出来，否则 matched=0 会被当成「真的没有」。
-			if !strings.Contains(strings.Join(got.Skipped, ","), "hidden_entries") {
-				t.Fatalf("a directory search must report skipped hidden entries, got %#v", got.Skipped)
-			}
-		}},
-		{name: "default mode returns line groups", files: map[string]string{
-			"a.txt": "needle\n", "b.txt": "needle\n",
-		}, check: func(t *testing.T, search func(GrepRequest) (*GrepResult, error)) {
-			got, err := search(GrepRequest{Pattern: "needle"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.Mode != grep.OutputModeLines || len(got.LineHits) != 2 || len(got.FileCounts) != 0 {
-				t.Fatalf("default grep must return line groups without per-file counts, got %#v", got)
-			}
-		}},
-		{name: "occurrence count counts every hit", files: map[string]string{
-			"a.txt": "ally ally\nfinally\n", "b.txt": "ally\n",
-		}, check: func(t *testing.T, search func(GrepRequest) (*GrepResult, error)) {
-			got, err := search(GrepRequest{Pattern: "ally"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.MatchedLines != 3 {
-				t.Fatalf("expected three matching lines, got %#v", got)
-			}
-			if got.Hits != 4 {
-				t.Fatalf("expected four occurrences, got %#v", got)
-			}
-		}},
-		{name: "exact counts survive line-budget truncation", files: map[string]string{
-			"a.txt": "needle one\nneedle two\n", "b.txt": "needle three\n",
-		}, check: func(t *testing.T, search func(GrepRequest) (*GrepResult, error)) {
-			got, err := search(GrepRequest{Pattern: "needle", OutputMode: grep.OutputModeLines, MaxMatches: 1})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.Files != 2 || got.MatchedLines != 3 || got.Hits != 3 {
-				t.Fatalf("expected exact counts despite sample truncation, got %#v", got)
-			}
-			// 行预算是全局的：采样进一行之后，下一个命中文件就把它用完了。契约是
-			// 「样本限制为一行」，不承诺落在哪个文件上。
-			if !got.Truncated || len(got.LineHits) != 1 || len(got.LineHits[0].Lines) != 1 {
-				t.Fatalf("expected single-line samples and truncation, got %#v", got)
-			}
-			hits := got.LineHits[0]
-			if hits.Path != "a.txt" && hits.Path != "b.txt" {
-				t.Fatalf("unexpected sample file %q", hits.Path)
-			}
-			if len(hits.Texts) != 1 || hits.Texts[0] == "" {
-				t.Fatalf("expected the sampled line to carry its text preview, got %#v", hits)
-			}
-		}},
-		{name: "exact counts survive match-limit truncation", files: map[string]string{
-			"a.txt": "needle\nneedle\nneedle\nneedle\nneedle\n",
-		}, check: func(t *testing.T, search func(GrepRequest) (*GrepResult, error)) {
-			got, err := search(GrepRequest{Pattern: "needle", OutputMode: grep.OutputModeLines, MaxMatches: 3})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.MatchedLines != 5 || got.Hits != 5 || got.Files != 1 {
-				t.Fatalf("expected exact counts despite match sample truncation, got %#v", got)
-			}
-			if !got.Truncated || len(got.LineHits) != 1 || len(got.LineHits[0].Lines) != 3 {
-				t.Fatalf("expected three sample lines and truncation, got %#v", got)
-			}
-		}},
-		{name: "ignored files are opt-in", files: map[string]string{
-			".ignore": "ignored.txt\n", "kept.txt": "needle\n", "ignored.txt": "needle\n",
-		}, check: func(t *testing.T, search func(GrepRequest) (*GrepResult, error)) {
-			defaultResult, err := search(GrepRequest{Pattern: "needle"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if defaultResult.MatchedLines != 1 {
-				t.Fatalf("expected ignored file to be skipped by default, got %#v", defaultResult)
-			}
-			includeIgnored, err := search(GrepRequest{Pattern: "needle", IncludeIgnored: true})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if includeIgnored.MatchedLines != 2 {
-				t.Fatalf("expected ignored file to be included, got %#v", includeIgnored)
-			}
-		}},
-		{name: "heavy directories use explicit override", files: map[string]string{
-			"src/main.go": "ally\n", "frontend/dist/app.js": "ally\n", "node_modules/pkg/index.js": "ally\n",
-		}, check: func(t *testing.T, search func(GrepRequest) (*GrepResult, error)) {
-			got, err := search(GrepRequest{Pattern: "ally", OutputMode: grep.OutputModeLines})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.MatchedLines != 1 || got.Hits != 1 || got.Files != 1 {
-				t.Fatalf("expected only source match outside heavy dirs, got %#v", got)
-			}
-			if got.LineHits[0].Path != "src/main.go" {
-				t.Fatalf("unexpected match path %q", got.LineHits[0].Path)
-			}
-			if len(got.Skipped) == 0 {
-				t.Fatalf("workspace-wide grep must report its skip policy, got %#v", got)
-			}
-			all, err := search(GrepRequest{Pattern: "ally", IncludeIgnored: true})
-			if err != nil || all.Files != 3 {
-				t.Fatalf("explicit directory override: %+v %v", all, err)
-			}
-
-		}},
-		{name: "explicit path overrides broad exclusions", files: map[string]string{
-			"dist/pkg/source.go": "needle\n",
-		}, check: func(t *testing.T, search func(GrepRequest) (*GrepResult, error)) {
-			got, err := search(GrepRequest{Pattern: "needle", OutputMode: grep.OutputModeLines, Path: "dist"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.MatchedLines != 1 || got.Hits != 1 || got.Files != 1 {
-				t.Fatalf("explicit path must override broad-search exclusions, got %#v", got)
-			}
-			if len(got.LineHits) != 1 || got.LineHits[0].Path != "dist/pkg/source.go" {
-				t.Fatalf("unexpected explicit-path lines result %#v", got.LineHits)
-			}
-			// 隐藏条目就算指名目录也依旧被跳过，这是遍历本身的性质，不属于「大范围策略」。
-			for _, note := range got.Skipped {
-				if note == "files_over_10MB" || strings.HasPrefix(note, "directories:") {
-					t.Fatalf("explicit path search must not report broad skip policies, got %#v", got.Skipped)
-				}
-			}
-		}},
-		{name: "checked-in build output stays searchable, dependency trees do not", files: map[string]string{
-			"src/app.go":          "needle\n",
-			"build/main.go":       "needle\n",
-			"vendor/lib.go":       "needle\n",
-			"target/debug/out.rs": "needle\n",
-		}, check: func(t *testing.T, search func(GrepRequest) (*GrepResult, error)) {
-			got, err := search(GrepRequest{Pattern: "needle", OutputMode: grep.OutputModeLines})
-			if err != nil {
-				t.Fatal(err)
-			}
-			// build 是可提交的手写内容，仍然搜得到；vendor（依赖树）与 target（产物）不进来。
-			if got.Files != 2 || got.MatchedLines != 2 {
-				t.Fatalf("build stays searchable, vendor and target stay excluded, got %#v", got)
-			}
-		}},
-		{name: "parent path still skips dependency directories", files: map[string]string{
-			"frontend/src/app.js":            "needle\n",
-			"frontend/node_modules/pkg/x.js": "needle\n",
-		}, check: func(t *testing.T, search func(GrepRequest) (*GrepResult, error)) {
-			got, err := search(GrepRequest{Pattern: "needle", OutputMode: grep.OutputModeLines, Path: "frontend"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.MatchedLines != 1 || got.Files != 1 || len(got.LineHits) != 1 || got.LineHits[0].Path != "frontend/src/app.js" {
-				t.Fatalf("a parent path must still skip dependency directories, got %#v", got)
-			}
-			if len(got.Skipped) == 0 {
-				t.Fatalf("a parent path must report the directory exclusions, got %#v", got.Skipped)
-			}
-		}},
-		{name: "path inside a dependency directory stays searchable", files: map[string]string{
-			"frontend/node_modules/pkg/x.js": "needle\n",
-		}, check: func(t *testing.T, search func(GrepRequest) (*GrepResult, error)) {
-			got, err := search(GrepRequest{Pattern: "needle", OutputMode: grep.OutputModeLines, Path: "frontend/node_modules/pkg"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.MatchedLines != 1 || len(got.LineHits) != 1 {
-				t.Fatalf("pointing into node_modules must keep it searchable, got %#v", got)
-			}
-			for _, note := range got.Skipped {
-				if strings.HasPrefix(note, "directories:") {
-					t.Fatalf("pointing into node_modules must not report directory exclusions, got %#v", got.Skipped)
-				}
-			}
-		}},
-		{name: "explicit path searches large files", files: map[string]string{
-			"large.txt": large,
-		}, check: func(t *testing.T, search func(GrepRequest) (*GrepResult, error)) {
-			workspaceSearch, err := search(GrepRequest{Pattern: "needle"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if workspaceSearch.MatchedLines != 0 {
-				t.Fatalf("workspace-wide search should keep the large-file guard, got %#v", workspaceSearch)
-			}
-			explicitSearch, err := search(GrepRequest{Pattern: "needle", Path: "large.txt"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if explicitSearch.MatchedLines != 1 || explicitSearch.Hits != 1 || explicitSearch.Files != 1 {
-				t.Fatalf("explicit path must search large files, got %#v", explicitSearch)
-			}
-		}},
-		{name: "file counts and offset end to end", files: map[string]string{
-			"cold.txt": "needle\n",
-		}, check: func(t *testing.T, search func(GrepRequest) (*GrepResult, error)) {
-			// hot.txt 由用例自己写：12 行命中 + cold.txt 1 行，共 13。
-			counts, err := search(GrepRequest{Pattern: "needle", OutputMode: grep.OutputModeCountMatches})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if counts.MatchedLines != 13 || counts.Hits != 13 || counts.Files != 2 {
-				t.Fatalf("expected exact stats, got %#v", counts)
-			}
-			if len(counts.FileCounts) != 2 || counts.FileCounts[0].Path != "hot.txt" || counts.FileCounts[0].Count != 12 || counts.FileCounts[1].Path != "cold.txt" || counts.FileCounts[1].Count != 1 {
-				t.Fatalf("expected descending fileCounts, got %#v", counts.FileCounts)
-			}
-			got, err := search(GrepRequest{Pattern: "needle", OutputMode: grep.OutputModeLines, MaxMatches: 5})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.MatchedLines != 13 || got.Hits != 13 || got.Files != 2 {
-				t.Fatalf("expected exact stats, got %#v", got)
-			}
-			if !got.Truncated || got.NextOffset != 5 {
-				t.Fatalf("expected truncated page with NextOffset 5, got %#v", got)
-			}
-			// 行预算跨文件组共享，且 rg 的遍历顺序不是字典序：这里先到 cold.txt，
-			// 所以第一页跨两个组、合计五个行号，而不是一个组的五行。
-			pageLines := 0
-			for _, g := range got.LineHits {
-				pageLines += len(g.Lines)
-			}
-			if pageLines != 5 {
-				t.Fatalf("expected five sampled line numbers on page one, got %#v", got.LineHits)
-			}
-		}},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			requireRipgrep(t)
-			root := t.TempDir()
-			for name, body := range tc.files {
-				writeToolTestFile(t, root, name, body)
-			}
-			if tc.name == "file counts and offset end to end" {
-				var b strings.Builder
-				for i := 0; i < 12; i++ {
-					fmt.Fprintf(&b, "line %d needle\n", i)
-				}
-				writeToolTestFile(t, root, "hot.txt", b.String())
-			}
-			app := newIsolatedTestApp(t)
-			tc.check(t, func(req GrepRequest) (*GrepResult, error) {
-				return app.grepFilesWithConfig(context.Background(), ConfigState{Workspace: root}, req)
-			})
-		})
-	}
-}
-
-func requireRipgrep(t *testing.T) {
-	t.Helper()
-	if _, err := grep.Find(); err != nil {
-		t.Skip("ripgrep is not installed")
-	}
-}
-
 func TestCompactToolResultForModelGroupsGrepRowsByFile(t *testing.T) {
 	// lines mode renders one bare path row per file group, then indented
 	// "line: text" rows — the path is spelled once per file to save tokens.
@@ -1424,11 +1106,11 @@ func TestPlanBatchValidationMergesSharedUnits(t *testing.T) {
 	writeToolTestFile(t, root, "web/x.vue", "<template><div/></template>\n")
 	writeToolTestFile(t, root, "data/cfg.json", "{}\n")
 	calls := []openai.ToolCall{
-		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"pkg/a.go","version":"abc123","changes":[{"oldText":"a","newText":"b"}]}`}},
+		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"pkg/a.go","changes":[{"oldText":"a","newText":"b"}]}`}},
 		{Function: openai.FunctionCall{Name: "read", Arguments: `{"files":[{"path":"pkg/a.go"}]}`}},
-		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"pkg/b.go","version":"abc123","changes":[{"oldText":"a","newText":"b"}]}`}},
+		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"pkg/b.go","changes":[{"oldText":"a","newText":"b"}]}`}},
 		{Function: openai.FunctionCall{Name: "create", Arguments: `{"path":"data/cfg.json","content":"{}"}`}},
-		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"web/x.vue","version":"abc123","changes":[{"oldText":"div","newText":"span"}]}`}},
+		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"web/x.vue","changes":[{"oldText":"div","newText":"span"}]}`}},
 	}
 	roots, err := workspaceRoots(cfg)
 	if err != nil {
@@ -1466,9 +1148,9 @@ func TestPlanBatchValidationMergesSharedUnits(t *testing.T) {
 	// nor contribute paths to it: the executed earlier edit keeps its
 	// validation instead of deferring to a call that will not run.
 	plan = planBatchValidation(roots, []openai.ToolCall{
-		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"pkg/a.go","version":"abc123","changes":[{"oldText":"a","newText":"b"}]}`}},
-		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"pkg/b.go","version":"abc123","changes":[{"oldText":"a","newText":"b"}]}`}},
-		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"pkg/c.go","version":"abc123","changes":[{"oldText":"a","newText":"b"}]}`}},
+		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"pkg/a.go","changes":[{"oldText":"a","newText":"b"}]}`}},
+		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"pkg/b.go","changes":[{"oldText":"a","newText":"b"}]}`}},
+		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"pkg/c.go","changes":[{"oldText":"a","newText":"b"}]}`}},
 	}, map[int]bool{2: true})
 	if got := plan[0]; len(got) != 0 {
 		t.Fatalf("call 0 should defer its package to the later executing edit, got %v", got)
@@ -1497,8 +1179,8 @@ func TestExecuteToolEditValidationFollowsBatchPlan(t *testing.T) {
 	enabled := true
 	cfg := ConfigState{Workspace: root, AutoValidationJSON: &enabled}
 	args, err := json.Marshal(FileTextEdits{
-		Path:    "config.json",
-		Version: hashVersion(original),
+		Path: "config.json",
+
 		Changes: []TextChange{{OldText: "true", NewText: ""}},
 	})
 	if err != nil {
@@ -1546,8 +1228,8 @@ func TestEditAutoValidationReturnsFailureWithoutUndoingWrite(t *testing.T) {
 	original := []byte("{\"ok\":true}\n")
 	writeToolTestFile(t, root, "config.json", string(original))
 	req := FileTextEdits{
-		Path:    "config.json",
-		Version: hashVersion(original),
+		Path: "config.json",
+
 		Changes: []TextChange{{OldText: "true", NewText: ""}},
 	}
 	payload, err := json.Marshal(req)
@@ -2319,11 +2001,11 @@ func TestCommandSafetyFence(t *testing.T) {
 	t.Parallel()
 	cases := []commandSafetyCase{
 		{name: "cmd /c option is not a drive path", onlyOS: "windows", command: `cmd.exe /c ver`},
-		{name: "read-only outside inspection", onlyOS: "windows", command: `(ls -la /d/coding/python/ | grep xx)`},
+		{name: "read-only outside inspection", onlyOS: "windows", command: `(ls -la /d/coding/python/ | rg xx)`},
 		{name: "git bash outside read with /dev/null", onlyOS: "windows", command: `(ls -la /c/Users/DELL/.agents/ 2>/dev/null && echo "---FOUND---" || echo "---NOT FOUND---")`},
 		{name: "git bash find outside with /dev/null", onlyOS: "windows", command: `(find /c/Users/DELL/ -maxdepth 5 -name "SKILL.md" -path "ai-writing" 2>/dev/null | head -5)`},
 		{name: "quoted git pretty format keeps email brackets", command: `git status --short && git log -1 --pretty=format:'%h %an <%ae> %s'`},
-		{name: "risk and delete words as data", command: `grep -R "rm" docs`},
+		{name: "risk and delete words as data", command: `rg "rm" docs`},
 		{name: "remove-item printed as data", command: `echo remove-item`},
 		{name: "shutdown inside a git log grep", command: `git log --grep=shutdown`},
 		{name: "reboot printed as data", command: `echo "reboot"`},
@@ -2624,172 +2306,6 @@ func writeToolTestFile(t *testing.T, root, rel, content string) {
 	}
 }
 
-func TestSessionReadCacheReturnsMetadataWithoutDuplicateContent(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	writeToolTestFile(t, dir, "sample.txt", "one\ntwo\n")
-	app := newIsolatedTestApp(t)
-	cache := newSessionReadCache()
-	ctx := context.WithValue(context.Background(), sessionReadCacheContextKey{}, cache)
-	args := []byte(`{"files":[{"path":"sample.txt"}]}`)
-
-	first := app.executeTool(ctx, ConfigState{Workspace: dir}, "session-1", "read", args)
-	if !first.OK {
-		t.Fatalf("first read failed: %#v", first)
-	}
-	firstData := first.Data.(*BatchReadResult)
-	if len(firstData.Files) != 1 || firstData.Files[0].Content == "" || firstData.Files[0].Reused {
-		t.Fatalf("expected complete first read, got %#v", firstData)
-	}
-	// The stored cache entry itself is content-free; it holds only the content hash.
-	if len(cache.entries) != 1 {
-		t.Fatalf("cache entries after first read = %d, want 1", len(cache.entries))
-	}
-	for _, h := range cache.entries {
-		if h == "" {
-			t.Fatalf("cached entry must hold a content hash")
-		}
-	}
-
-	second := app.executeTool(ctx, ConfigState{Workspace: dir}, "session-1", "read", args)
-	if !second.OK {
-		t.Fatalf("second read failed: %#v", second)
-	}
-	secondData := second.Data.(*BatchReadResult)
-	if len(secondData.Files) != 1 || !secondData.Files[0].Reused || secondData.Files[0].Content != "" || secondData.Files[0].Version == "" {
-		t.Fatalf("expected metadata-only reused read, got %#v", secondData)
-	}
-
-	// The tool declaration explains reused once; repeated receipts retain just
-	// current version/range metadata instead of a paragraph longer than small files.
-	firstModel := compactToolResultForModel("read", first, "")
-	if !strings.Contains(firstModel, "one") || strings.Contains(firstModel, "Content omitted") {
-		t.Fatalf("expected first compact read to carry content, got: %s", firstModel)
-	}
-	secondModel := compactToolResultForModel("read", second, "")
-	if len(secondModel) >= len(firstModel) || !strings.Contains(secondModel, ` | reused`) || !strings.Contains(secondModel, `version="`) {
-		t.Fatalf("expected reused compact read to explain the omission, got: %s", secondModel)
-	}
-
-	// In the persistent freshness-checked cache, unchanged files continue to return receipts.
-	third := app.executeTool(ctx, ConfigState{Workspace: dir}, "session-1", "read", args)
-	thirdData := third.Data.(*BatchReadResult)
-	if !third.OK || len(thirdData.Files) != 1 || !thirdData.Files[0].Reused || thirdData.Files[0].Content != "" {
-		t.Fatalf("expected reused read when file is unchanged on disk, got %#v", thirdData)
-	}
-
-	// Range-awareness: reading a specific line range produces a cache miss and returns full content for that range.
-	rangeArgs := []byte(`{"files":[{"path":"sample.txt","startLine":1,"endLine":1}]}`)
-	rangeRes := app.executeTool(ctx, ConfigState{Workspace: dir}, "session-1", "read", rangeArgs)
-	rangeData := rangeRes.Data.(*BatchReadResult)
-	if !rangeRes.OK || len(rangeData.Files) != 1 || rangeData.Files[0].Reused || rangeData.Files[0].Content == "" {
-		t.Fatalf("expected full content on range read miss, got %#v", rangeData)
-	}
-
-	// Repeated range read hits the range cache!
-	rangeRes2 := app.executeTool(ctx, ConfigState{Workspace: dir}, "session-1", "read", rangeArgs)
-	rangeData2 := rangeRes2.Data.(*BatchReadResult)
-	if !rangeRes2.OK || len(rangeData2.Files) != 1 || !rangeData2.Files[0].Reused {
-		t.Fatalf("expected reused content on repeated range read, got %#v", rangeData2)
-	}
-
-	// Modifying the file on disk busts the cache for the full read because full
-	// content changed. No write path invalidates the cache (see sessionReadCache):
-	// this hash comparison is the only thing keeping a rewritten file from being
-	// answered with its old payload, so it must keep working.
-	writeToolTestFile(t, dir, "sample.txt", "one\ntwo\nthree\n")
-	fourth := app.executeTool(ctx, ConfigState{Workspace: dir}, "session-1", "read", args)
-	fourthData := fourth.Data.(*BatchReadResult)
-	if !fourth.OK || len(fourthData.Files) != 1 || fourthData.Files[0].Reused || fourthData.Files[0].Content == "" {
-		t.Fatalf("expected full read after disk file modification, got %#v", fourthData)
-	}
-
-	// Crucial feature: reading lines 1..1 is STILL cached as reused because line 1 did not change,
-	// even though the rest of the file was modified!
-	rangeRes3 := app.executeTool(ctx, ConfigState{Workspace: dir}, "session-1", "read", rangeArgs)
-	rangeData3 := rangeRes3.Data.(*BatchReadResult)
-	if !rangeRes3.OK || len(rangeData3.Files) != 1 || !rangeData3.Files[0].Reused {
-		t.Fatalf("expected reused content for unchanged range 1..1 even after file was edited elsewhere, got %#v", rangeData3)
-	}
-
-	// Invalidation clears the entire cache.
-	cache.invalidate()
-	if len(cache.entries) != 0 {
-		t.Fatalf("cache entries after invalidation = %d, want 0", len(cache.entries))
-	}
-	fifth := app.executeTool(ctx, ConfigState{Workspace: dir}, "session-1", "read", args)
-	fifthData := fifth.Data.(*BatchReadResult)
-	if !fifth.OK || len(fifthData.Files) != 1 || fifthData.Files[0].Reused || fifthData.Files[0].Content == "" {
-		t.Fatalf("expected full read after invalidation, got %#v", fifthData)
-	}
-}
-
-// seedSessionReadCacheForTest writes one entry the way production does: putLocked
-// requires the caller to hold c.mu, and the read path reaches it from
-// dedupeResult while holding the lock.
-func seedSessionReadCacheForTest(cache *sessionReadCache, key, hash string) {
-	cache.mu.Lock()
-	defer cache.mu.Unlock()
-	cache.putLocked(key, hash)
-}
-
-func TestSessionReadCacheEvictsEntriesUnderPressure(t *testing.T) {
-	cache := newSessionReadCache()
-	// Fill past the entry budget; every insertion is a distinct key.
-	for i := 0; i < sessionReadCacheMaxEntries+8; i++ {
-		seedSessionReadCacheForTest(cache, fmt.Sprintf("key-%d", i), "hash-val")
-	}
-	if got := len(cache.entries); got > sessionReadCacheMaxEntries {
-		t.Fatalf("cache entries = %d, want <= %d", got, sessionReadCacheMaxEntries)
-	}
-	// Re-storing an existing key must not grow the cache.
-	seedSessionReadCacheForTest(cache, "key-0", "hash-val-updated")
-	if got := len(cache.entries); got > sessionReadCacheMaxEntries {
-		t.Fatalf("cache entries after re-store = %d, want <= %d", got, sessionReadCacheMaxEntries)
-	}
-}
-
-func TestBatchReadMixedWithMissingFilesDoesNotCorruptCacheKeys(t *testing.T) {
-	t.Parallel()
-	app := newIsolatedTestApp(t)
-	dir := t.TempDir()
-	app.config.Workspace = dir
-
-	fileA := filepath.Join(dir, "a.txt")
-	fileB := filepath.Join(dir, "b.txt")
-	if err := os.WriteFile(fileA, []byte("line1\nline2\nline3\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(fileB, []byte("b1\nb2\nb3\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cache := newSessionReadCache()
-	ctx := context.WithValue(context.Background(), sessionReadCacheContextKey{}, cache)
-
-	// Batch read: a.txt (1..1), missing.txt (2..2), b.txt (3..3)
-	args := []byte(`{"files":[` +
-		`{"path":"a.txt","startLine":1,"endLine":1},` +
-		`{"path":"missing.txt","startLine":2,"endLine":2},` +
-		`{"path":"b.txt","startLine":3,"endLine":3}` +
-		`]}`)
-	res1 := app.executeTool(ctx, ConfigState{Workspace: dir}, "session-1", "read", args)
-	if !res1.OK {
-		t.Fatalf("executeTool read failed: %#v", res1)
-	}
-
-	// Now re-read b.txt (3..3) alone: it MUST hit the cache and be reused with correct key!
-	bArgs := []byte(`{"files":[{"path":"b.txt","startLine":3,"endLine":3}]}`)
-	res2 := app.executeTool(ctx, ConfigState{Workspace: dir}, "session-1", "read", bArgs)
-	if !res2.OK {
-		t.Fatalf("executeTool read b.txt failed: %#v", res2)
-	}
-	bData := res2.Data.(*BatchReadResult)
-	if len(bData.Files) != 1 || !bData.Files[0].Reused {
-		t.Fatalf("expected b.txt (3..3) to be reused despite missing.txt in earlier batch, got %#v", bData)
-	}
-}
-
 // TestReadRejectsOfficeDocumentsWithAnydocGuidance covers the deliberate
 // removal of built-in document extraction: office/PDF files must fail with the
 // coded E_DOCUMENT_UNSUPPORTED error that points at the anydoc skill instead
@@ -2857,8 +2373,8 @@ func TestBatchReadKeepsSamePathWithDifferentEffectiveRanges(t *testing.T) {
 	if result.Files[1].Content != "2: two\n3: three" {
 		t.Fatalf("expected second read to contain numbered lines through EOF, got:\n%s", result.Files[1].Content)
 	}
-	if result.Files[0].ContentFormat != "line_numbers" || result.Files[0].Version != hashVersion([]byte("one\ntwo\nthree\n")) {
-		t.Fatalf("expected numbered content with version metadata, got %#v", result.Files[0])
+	if result.Files[0].ContentFormat != "line_numbers" {
+		t.Fatalf("expected numbered content, got %#v", result.Files[0])
 	}
 }
 
@@ -3091,7 +2607,7 @@ func TestExecuteToolRejectsLegacyStringEditFields(t *testing.T) {
 	app := newIsolatedTestApp(t)
 	cfg := ConfigState{Workspace: dir}
 
-	result := app.executeTool(context.Background(), cfg, "session-1", "edit", []byte(`{"path": "sample.txt", "version": "000000000000",
+	result := app.executeTool(context.Background(), cfg, "session-1", "edit", []byte(`{"path": "sample.txt",
 		"edits": [
 			{"oldString": "alpha", "newString": "ALPHA"},
 			{"oldString": "gamma", "newString": "GAMMA"}
@@ -3172,12 +2688,11 @@ func TestExecuteToolAppliesMultipleBatchTextChanges(t *testing.T) {
 	app := newIsolatedTestApp(t)
 	cfg := ConfigState{Workspace: dir}
 
-	result := app.executeTool(context.Background(), cfg, "session-1", "edit", []byte(fmt.Sprintf(`{"path": "sample.txt",
-		"version": %q,
+	result := app.executeTool(context.Background(), cfg, "session-1", "edit", []byte(`{"path": "sample.txt",
 		"changes": [
 			{"oldText": "alpha", "newText": "ALPHA"},
 			{"oldText": "gamma", "newText": "GAMMA"}
-		]}`, strings.ToUpper(hashVersion(original)))))
+		]}`))
 	if !result.OK {
 		t.Fatalf("expected batch edit to succeed, got error %q", result.Error)
 	}
@@ -3190,17 +2705,17 @@ func TestExecuteToolAppliesMultipleBatchTextChanges(t *testing.T) {
 	}
 }
 
-func TestExecuteToolAppliesOriginalSnapshotLineRangesWithoutOffsetDrift(t *testing.T) {
+func TestExecuteToolAppliesOriginalSnapshotTextChanges(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	original := []byte("one\ntwo\nthree\nfour\nfive\nsix\n")
 	if err := os.WriteFile(filepath.Join(dir, "sample.txt"), original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	args := fmt.Sprintf(`{"path":"sample.txt","version":%q,"changes":[{"lineRange":{"start":2,"startText":"two"},"newText":"TWO\ninserted"},{"lineRange":{"start":5,"startText":"five"},"newText":"FIVE"}]}`, hashVersion(original))
+	args := `{"path":"sample.txt","changes":[{"oldText":"two","newText":"TWO\ninserted"},{"oldText":"five","newText":"FIVE"}]}`
 	result := newIsolatedTestApp(t).executeTool(context.Background(), ConfigState{Workspace: dir}, "session-1", "edit", []byte(args))
 	if !result.OK {
-		t.Fatalf("line-range edit failed: %#v", result)
+		t.Fatalf("text edit failed: %#v", result)
 	}
 	got, err := os.ReadFile(filepath.Join(dir, "sample.txt"))
 	if err != nil {
@@ -3208,17 +2723,17 @@ func TestExecuteToolAppliesOriginalSnapshotLineRangesWithoutOffsetDrift(t *testi
 	}
 	want := "one\nTWO\ninserted\nthree\nfour\nFIVE\nsix\n"
 	if string(got) != want {
-		t.Fatalf("later line range must retain original snapshot position:\nwant %q\n got %q", want, got)
+		t.Fatalf("later changes must use the original snapshot:\nwant %q\n got %q", want, got)
 	}
 }
 
-// A change naming two sources, or pairing replaceAll with lineRange, is refused
-// before anything is written: the runtime must never pick a source silently.
-func TestExecuteToolRejectsChangeWithTwoSourcesOrReplaceAllBesideLineRange(t *testing.T) {
+// Missing or removed source parameters cannot trigger writes.
+func TestExecuteToolRejectsRemovedOrMissingEditParameters(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
-		"two sources":                 `{"oldText":"alpha","lineRange":{"start":2,"startText":"beta"},"newText":"ALPHA"}`,
-		"replaceAll beside lineRange": `{"lineRange":{"start":2,"startText":"beta"},"newText":"ALPHA","replaceAll":true}`,
+		"missing source": `{"newText":""}`,
+		"empty source":   `{"oldText":"","newText":"ALPHA","replaceAll":true}`,
+		"removed scope":  `{"oldText":"alpha","lineRange":{"start":2},"newText":"ALPHA"}`,
 	}
 	for name, change := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -3227,14 +2742,14 @@ func TestExecuteToolRejectsChangeWithTwoSourcesOrReplaceAllBesideLineRange(t *te
 			if err := os.WriteFile(filepath.Join(dir, "sample.txt"), original, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			args := fmt.Sprintf(`{"path":"sample.txt","version":%q,"changes":[%s]}`, hashVersion(original), change)
+			args := fmt.Sprintf(`{"path":"sample.txt","changes":[%s]}`, change)
 			result := newIsolatedTestApp(t).executeTool(context.Background(), ConfigState{Workspace: dir}, "session-1", "edit", []byte(args))
 			if result.OK {
 				t.Fatalf("the call must be refused, got %#v", result)
 			}
-			want := "replaceAll"
-			if name == "two sources" {
-				want = "exactly one source"
+			want := "oldText"
+			if name == "removed scope" {
+				want = "lineRange"
 			}
 			if !strings.Contains(result.Error, want) {
 				t.Fatalf("rejection %q must mention %q", result.Error, want)
@@ -3262,8 +2777,8 @@ func TestExecuteToolEditsParallelCallsPerFile(t *testing.T) {
 	}
 	// One flat edit call per file, sent as parallel tool calls in one batch.
 	calls := []openai.ToolCall{
-		{Function: openai.FunctionCall{Name: "edit", Arguments: fmt.Sprintf(`{"path":"a.txt","version":%q,"changes":[{"oldText":"alpha","newText":"ALPHA"}]}`, hashVersion(a))}},
-		{Function: openai.FunctionCall{Name: "edit", Arguments: fmt.Sprintf(`{"path":"b.txt","version":%q,"changes":[{"oldText":"beta","newText":"BETA"}]}`, hashVersion(b))}},
+		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"a.txt","changes":[{"oldText":"alpha","newText":"ALPHA"}]}`}},
+		{Function: openai.FunctionCall{Name: "edit", Arguments: `{"path":"b.txt","changes":[{"oldText":"beta","newText":"BETA"}]}`}},
 	}
 	app := newIsolatedTestApp(t)
 	for i, call := range calls {
@@ -3329,8 +2844,8 @@ func TestExecuteToolEditRollsBackEarlierFilesWhenCommitFails(t *testing.T) {
 	app := newIsolatedTestApp(t)
 	cfg := ConfigState{Workspace: dir}
 	files := []FileTextEdits{
-		{Path: "a.txt", Version: hashVersion(a), Changes: []TextChange{{OldText: "alpha", NewText: "ALPHA"}}},
-		{Path: "sub/b.txt", Version: hashVersion(b), Changes: []TextChange{{OldText: "beta", NewText: "BETA"}}},
+		{Path: "a.txt", Changes: []TextChange{{OldText: "alpha", NewText: "ALPHA"}}},
+		{Path: "sub/b.txt", Changes: []TextChange{{OldText: "beta", NewText: "BETA"}}},
 	}
 	_, err := app.editFilesWithConfig(cfg, files)
 	if err == nil {
@@ -3363,14 +2878,14 @@ func TestExecuteToolEditRejectsLegacyNestedFilesForm(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "sample.txt"), original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	version := hashVersion(original)
+
 	app := newIsolatedTestApp(t)
 	cfg := ConfigState{Workspace: dir}
 
 	// The flat single-file shape is the only accepted form; nested
 	// {"files":[...]} arguments from before the schema change fail without
 	// touching the file — there is no compatibility backdoor.
-	args := fmt.Sprintf(`{"files":[{"path":"sample.txt","version":%q,"changes":[{"oldText":"alpha","newText":"ALPHA"}]}]}`, version)
+	args := `{"files":[{"path":"sample.txt","changes":[{"oldText":"alpha","newText":"ALPHA"}]}]}`
 	result := app.executeTool(context.Background(), cfg, "session-1", "edit", []byte(args))
 	if result.OK || result.ErrorCode != "E_BAD_ARGS" {
 		t.Fatalf("expected legacy nested files form to be rejected, got %#v", result)
@@ -3378,7 +2893,7 @@ func TestExecuteToolEditRejectsLegacyNestedFilesForm(t *testing.T) {
 
 	// A double-encoded files array is likewise rejected, not repaired into
 	// an edit.
-	stringEncoded := fmt.Sprintf(`{"files":"[{\"path\":\"sample.txt\",\"version\":\"%s\",\"changes\":[{\"oldText\":\"alpha\",\"newText\":\"ALPHA\"}]}]"}`, version)
+	stringEncoded := `{"files":"[{\"path\":\"sample.txt\",\"changes\":[{\"oldText\":\"alpha\",\"newText\":\"ALPHA\"}]}]"}`
 	result = app.executeTool(context.Background(), cfg, "session-1", "edit", []byte(stringEncoded))
 	if result.OK || result.ErrorCode != "E_BAD_ARGS" {
 		t.Fatalf("expected string-encoded legacy files form to be rejected, got %#v", result)
@@ -3393,7 +2908,7 @@ func TestExecuteToolEditRejectsLegacyNestedFilesForm(t *testing.T) {
 	}
 }
 
-func TestExecuteToolRequiresVersionForEdit(t *testing.T) {
+func TestExecuteToolEditsFromCommandOutputWithoutRead(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	original := []byte("alpha\nbeta\n")
@@ -3401,16 +2916,33 @@ func TestExecuteToolRequiresVersionForEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := newIsolatedTestApp(t)
-	result := app.executeTool(context.Background(), ConfigState{Workspace: dir}, "session-1", "edit", []byte(`{"path": "sample.txt", "changes": [{"oldText": "beta", "newText": "BETA"}]}`))
-	if result.OK || !strings.Contains(result.Error, "version") {
-		t.Fatalf("expected the missing version to be named, got %#v", result)
+	cfg := ConfigState{Workspace: dir}
+	output, err := app.runCommandWithConfig(t.Context(), cfg, CommandRequest{Command: "cat sample.txt"})
+	if err != nil || output.ExitCode != 0 || output.Output != string(original) {
+		t.Fatalf("command did not return the source: %+v, %v", output, err)
+	}
+	args, err := json.Marshal(FileTextEdits{Path: "sample.txt", Changes: []TextChange{{OldText: output.Output, NewText: "alpha\nBETA\n"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := app.executeTool(t.Context(), cfg, "session-1", "edit", args)
+	if !result.OK {
+		t.Fatalf("direct edit without a prior read failed: %#v", result)
 	}
 	got, err := os.ReadFile(filepath.Join(dir, "sample.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != string(original) {
-		t.Fatalf("expected missing-version edit to leave file unchanged, got %q", string(got))
+	if string(got) != "alpha\nBETA\n" {
+		t.Fatalf("direct edit produced unexpected contents: %q", string(got))
+	}
+	result = app.executeTool(t.Context(), cfg, "session-1", "edit", []byte(`{"path":"sample.txt","changes":[{"oldText":"BETA","newText":"gamma"}]}`))
+	if !result.OK {
+		t.Fatalf("subsequent edit without another read failed: %#v", result)
+	}
+	got, err = os.ReadFile(filepath.Join(dir, "sample.txt"))
+	if err != nil || string(got) != "alpha\ngamma\n" {
+		t.Fatalf("subsequent edit produced unexpected contents: %q, %v", got, err)
 	}
 }
 
@@ -3422,9 +2954,8 @@ func TestExecuteToolEditHandlesUniqueSingleLineSubstring(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := newIsolatedTestApp(t)
-	result := app.executeTool(context.Background(), ConfigState{Workspace: dir}, "session-1", "edit", []byte(fmt.Sprintf(`{"path": "config.json",
-		"version": %q,
-		"changes": [{"oldText": "false", "newText": "true"}]}`, hashVersion(original))))
+	result := app.executeTool(context.Background(), ConfigState{Workspace: dir}, "session-1", "edit", []byte(`{"path": "config.json",
+		"changes": [{"oldText": "false", "newText": "true"}]}`))
 	if !result.OK {
 		t.Fatalf("expected edit to succeed, got %#v", result)
 	}
@@ -3445,9 +2976,8 @@ func TestExecuteToolEditRejectsMultipleMatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := newIsolatedTestApp(t)
-	result := app.executeTool(context.Background(), ConfigState{Workspace: dir}, "session-1", "edit", []byte(fmt.Sprintf(`{"path": "sample.txt",
-		"version": %q,
-		"changes": [{"oldText": "foo", "newText": "bar"}]}`, hashVersion(original))))
+	result := app.executeTool(context.Background(), ConfigState{Workspace: dir}, "session-1", "edit", []byte(`{"path": "sample.txt",
+		"changes": [{"oldText": "foo", "newText": "bar"}]}`))
 	if result.OK || !strings.Contains(result.Error, "[E_MULTI_MATCH]") {
 		t.Fatalf("expected edit multi-match failure, got %#v", result)
 	}
@@ -3478,8 +3008,8 @@ func TestExecuteToolEditReplacesAllMatchesWhenRequested(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "sample.txt"), original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	result := newIsolatedTestApp(t).executeTool(context.Background(), ConfigState{Workspace: dir}, "session-1", "edit", []byte(fmt.Sprintf(`{"path": "sample.txt", "version": %q,
-		"changes": [{"oldText": "foo", "newText": "bar", "replaceAll": true}]}`, hashVersion(original))))
+	result := newIsolatedTestApp(t).executeTool(context.Background(), ConfigState{Workspace: dir}, "session-1", "edit", []byte(`{"path": "sample.txt",
+		"changes": [{"oldText": "foo", "newText": "bar", "replaceAll": true}]}`))
 	if !result.OK {
 		t.Fatalf("replaceAll edit failed: %#v", result)
 	}
@@ -3504,12 +3034,11 @@ func TestExecuteToolEditRejectsOverlappingChangesInBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := newIsolatedTestApp(t)
-	result := app.executeTool(context.Background(), ConfigState{Workspace: dir}, "session-1", "edit", []byte(fmt.Sprintf(`{"path": "sample.txt",
-		"version": %q,
+	result := app.executeTool(context.Background(), ConfigState{Workspace: dir}, "session-1", "edit", []byte(`{"path": "sample.txt",
 		"changes": [
 			{"oldText": "abc", "newText": "ABC"},
 			{"oldText": "bc", "newText": "BC"}
-		]}`, hashVersion(original))))
+		]}`))
 	if result.OK || result.ErrorCode != "E_OVERLAPPING_CHANGES" {
 		t.Fatalf("expected overlap failure, got %#v", result)
 	}
@@ -3999,10 +3528,10 @@ func TestLocalEditPlanIsSharedByConflictDetectionAndExecution(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := ConfigState{Workspace: dir}
-	version := hashVersion(original)
+
 	files := []FileTextEdits{
-		{Path: "sample.txt", Version: version, Changes: []TextChange{{OldText: "alpha", NewText: "ALPHA"}}},
-		{Path: "./sample.txt", Version: version, Changes: []TextChange{{OldText: "beta", NewText: "BETA"}}},
+		{Path: "sample.txt", Changes: []TextChange{{OldText: "alpha", NewText: "ALPHA"}}},
+		{Path: "./sample.txt", Changes: []TextChange{{OldText: "beta", NewText: "BETA"}}},
 	}
 
 	plan, err := planLocalEditBatch(cfg, files, localEditPlanForExecution)
@@ -4015,7 +3544,7 @@ func TestLocalEditPlanIsSharedByConflictDetectionAndExecution(t *testing.T) {
 
 	// Model-facing calls are flat and single-file. The executor and the
 	// conflict detector must still agree on the same plan boundary.
-	args, err := json.Marshal(FileTextEdits{Path: "sample.txt", Version: version, Changes: []TextChange{{OldText: "alpha", NewText: "ALPHA"}, {OldText: "beta", NewText: "BETA"}}})
+	args, err := json.Marshal(FileTextEdits{Path: "sample.txt", Changes: []TextChange{{OldText: "alpha", NewText: "ALPHA"}, {OldText: "beta", NewText: "BETA"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4050,11 +3579,10 @@ func TestExecuteToolEditRejectsTruncatedArguments(t *testing.T) {
 	}
 	app := newIsolatedTestApp(t)
 	cfg := ConfigState{Workspace: dir}
-	version := strings.ToUpper(hashVersion(original))
 
 	// Stream cut inside a change: the call fails with the explicit truncation
 	// error and nothing is written. The model resends the complete call.
-	truncated := fmt.Sprintf(`{"path":"sample.txt","version":%q,"changes":[{"oldText":"alpha","newText":"ALPHA"},{"oldText":"beta","newText":"BET`, version)
+	truncated := `{"path":"sample.txt","changes":[{"oldText":"alpha","newText":"ALPHA"},{"oldText":"beta","newText":"BET`
 	result := app.executeTool(context.Background(), cfg, "session-1", "edit", []byte(truncated))
 	if result.OK || !strings.Contains(strings.ToLower(result.Error), "truncated") {
 		t.Fatalf("expected truncation error without salvage, got %#v", result)
@@ -4076,7 +3604,7 @@ func TestExecuteToolEditRejectsTruncatedArguments(t *testing.T) {
 }
 
 func TestPrepareToolCallsForExecutionRewritesInvalidJSONToMarker(t *testing.T) {
-	valid := `{"path":"sample.txt","version":"abc123","changes":[{"oldText":"alpha","newText":"ALPHA"}]}`
+	valid := `{"path":"sample.txt","changes":[{"oldText":"alpha","newText":"ALPHA"}]}`
 	prepared, executionArgs := prepareToolCallsForExecution([]openai.ToolCall{
 		{ID: "call_1", Type: openai.ToolTypeFunction, Function: openai.FunctionCall{Name: "edit", Arguments: valid}},
 		{ID: "call_2", Type: openai.ToolTypeFunction, Function: openai.FunctionCall{Name: "list_files"}},
@@ -4104,7 +3632,7 @@ func TestExecuteToolEditDoesNotMislabelSchemaErrorAsTruncation(t *testing.T) {
 	t.Parallel()
 	app := newIsolatedTestApp(t)
 	result := app.executeTool(context.Background(), ConfigState{Workspace: t.TempDir()}, "session-1", "edit", []byte(
-		`{"path":"sample.txt","version":"abc123","changes":[{"oldString":"alpha","newString":"ALPHA"}]}`,
+		`{"path":"sample.txt","changes":[{"oldString":"alpha","newString":"ALPHA"}]}`,
 	))
 	if result.OK {
 		t.Fatal("legacy unknown change fields must fail the model-facing edit schema")

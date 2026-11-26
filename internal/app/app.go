@@ -27,8 +27,6 @@ import (
 	"unicode/utf8"
 
 	"ally-dev/internal/chatgpt"
-	"ally-dev/internal/tools/edit"
-	"ally-dev/internal/tools/grep"
 	"ally-dev/internal/tools/imagegen"
 	"ally-dev/internal/tools/pathutil"
 	"ally-dev/internal/tools/schemautil"
@@ -79,8 +77,6 @@ const (
 	defaultLLMRetries  = 6
 	defaultShellLimit  = 120
 	defaultHTTPTimeout = 60
-	defaultGrepTimeout = grep.DefaultTimeout
-	maxGrepTimeout     = grep.MaxTimeout
 	maxWaitSeconds     = toolshared.MaxWaitSeconds
 	// Response-size bounds shared with the built-in tool schemas: the schema is
 	// the contract the model reads, so both sides read one definition.
@@ -428,19 +424,14 @@ type App struct {
 	reasoningStash    *reasoningStash
 	modelHistoryCodec *modelHistoryCodec
 
-	// readCaches holds one read-dedup cache per session id (sessionReadCache in
-	// orch_read.go). Memory-only: a restarted process starts empty, and
-	// releaseSession drops the entry together with the rest of the session
-	// state. Guarded by a.mu.
-	readCaches    map[string]*sessionReadCache
 	fileReadSlots chan struct{}
 
 	// contextLocks holds one request-prefix baseline per session id
 	// (sessionContextLock in biz_context_lock.go): the fingerprint of the last
 	// request each lane sent, so a later change to an already-sent prefix is
 	// reported instead of silently costing the provider's prompt cache.
-	// Memory-only, and dropped together with the history rewrites that
-	// invalidate readCaches. a.mu guards the map; each lock guards its own
+	// Memory-only, and dropped when history is rewritten or the session is
+	// released. a.mu guards the map; each lock guards its own
 	// entries, because hashing must never run under a.mu.
 	contextLocks map[string]*sessionContextLock
 }
@@ -460,7 +451,6 @@ func newAppState(dataDir string) *App {
 		compactingCancels:  map[string]context.CancelFunc{},
 		compactFailures:    map[string]int{},
 		histories:          map[string][]openai.ChatCompletionMessage{},
-		readCaches:         map[string]*sessionReadCache{},
 		fileReadSlots:      make(chan struct{}, maxToolConcurrency),
 		contextLocks:       map[string]*sessionContextLock{},
 		plans:              map[string][]PlanStep{},
@@ -899,7 +889,6 @@ type ReadFileResult struct {
 	NextStartLine         int      `json:"nextStartLine,omitempty"`
 	TotalLines            int      `json:"totalLines"`
 	SHA256                string   `json:"sha256"`
-	Version               string   `json:"version"`
 	Size                  int64    `json:"size"`
 	LineEnding            string   `json:"lineEnding"`
 	Truncated             bool     `json:"truncated"`
@@ -1114,7 +1103,6 @@ type toolExecutionMeta struct {
 }
 
 type toolExecutionMetaContextKey struct{}
-type sessionReadCacheContextKey struct{}
 
 type ServiceInfo struct {
 	ID              string `json:"id"`
@@ -1252,18 +1240,17 @@ type RemoteReadFileRequest struct {
 }
 
 // RemoteEditRequest is the flat model-facing remote_edit request: exactly one
-// file per call, path/version/changes at the top level under the SSH alias —
+// file per call, path/changes at the top level under the SSH alias —
 // the same shape local edit uses, with an SSH server `alias` and absolute path.
 // Multi-file changes are parallel remote_edit calls in one model response.
 type RemoteEditRequest struct {
 	Alias   string       `json:"alias"`
 	Path    string       `json:"path"`
-	Version string       `json:"version"`
 	Changes []TextChange `json:"changes"`
 }
 
 func (req RemoteEditRequest) file() FileTextEdits {
-	return FileTextEdits{Path: req.Path, Version: req.Version, Changes: req.Changes}
+	return FileTextEdits{Path: req.Path, Changes: req.Changes}
 }
 
 type RemoteCreateFileRequest struct {
@@ -1362,8 +1349,6 @@ type EditResult struct {
 	Path              string   `json:"path"`
 	BeforeSHA256      string   `json:"beforeSha256"`
 	AfterSHA256       string   `json:"afterSha256"`
-	BeforeVersion     string   `json:"beforeVersion"`
-	Version           string   `json:"version"`
 	BeforeBytes       int      `json:"beforeBytes"`
 	AfterBytes        int      `json:"afterBytes"`
 	Replacements      int      `json:"-"`
@@ -1392,7 +1377,6 @@ type EditResult struct {
 
 type FileTextEdits struct {
 	Path    string       `json:"path"`
-	Version string       `json:"version"`
 	Changes []TextChange `json:"changes"`
 }
 
@@ -1402,10 +1386,9 @@ type FileTextEdits struct {
 // content without a word. The argument gate enforces the declaration before the
 // edit handler runs (see TestEditRejectsChangeWithoutNewText).
 type TextChange struct {
-	OldText    string          `json:"oldText,omitempty"`
-	LineRange  *edit.LineRange `json:"lineRange,omitempty"`
-	NewText    string          `json:"newText"`
-	ReplaceAll bool            `json:"replaceAll,omitempty"`
+	OldText    string `json:"oldText"`
+	NewText    string `json:"newText"`
+	ReplaceAll bool   `json:"replaceAll,omitempty"`
 }
 
 type MultiEditResult struct {
@@ -1463,7 +1446,6 @@ type BatchReadResultItem struct {
 	StartLine             int             `json:"startLine"`
 	EndLine               int             `json:"endLine"`
 	NextStartLine         int             `json:"nextStartLine,omitempty"`
-	Version               string          `json:"version"`
 	Size                  int64           `json:"size"`
 	TotalLines            int             `json:"totalLines"`
 	LineEnding            string          `json:"lineEnding"`
@@ -1474,7 +1456,6 @@ type BatchReadResultItem struct {
 	EmptyRange            bool            `json:"emptyRange,omitempty"`
 	Error                 string          `json:"error,omitempty"`
 	ErrorCode             string          `json:"errorCode,omitempty"`
-	Reused                bool            `json:"reused,omitempty"`
 	// DataURL is set only for image files: a data:image/<mime>;base64,... URL
 	// used to inject the picture into multimodal model context.
 	DataURL string `json:"dataUrl,omitempty"`
@@ -1835,17 +1816,37 @@ type runFinish struct {
 // finishRun is the single end-of-run exit: one line per step, in the order the
 // steps depend on each other. Independent steps run concurrently.
 func (a *App) finishRun(f runFinish, messages []openai.ChatCompletionMessage, outcome runOutcome) {
+	// Stop admission before checkpointing. Inputs accepted before an error or
+	// cancellation still belong in history, even if the model never saw them.
+	inputs := a.drainRunInputs(f.runID, true)
+	if len(inputs) > 0 && len(messages) == 0 {
+		messages = a.loadSessionHistoryCopy(f.sessionID)
+	}
+	for _, input := range inputs {
+		messages = appendUserMessageWithAttachments(messages, input.Text, input.Attachments)
+	}
+	if len(inputs) > 0 && outcome.kind == "done" {
+		outcome.kind, outcome.message = "error", "run ended before processing queued messages"
+	}
 	// History: the final version on success, the checkpoint save otherwise.
+	var historyErr, indexErr error
 	if outcome.kind == "done" || len(sanitizeHistoryMessages(messages)) > 0 {
-		a.saveHistory(f.sessionID, messages)
+		historyErr = a.saveHistory(f.sessionID, messages)
 	}
 	// These three read the saved history and touch different state: run them
-	// together instead of one after another. A failing step is logged, not fatal.
+	// together instead of one after another. Persistence errors reach the outcome.
 	runParallel("run finish",
-		func() { a.restoreSavedHistoryBreakdown(f.sessionID) },     // context breakdown
-		func() { a.syncRunSessionIndex(f.sessionID, f.syncIndex) }, // session index
-		func() { a.invalidateGitStatus(f.workspace) },              // Git status cache
+		func() { a.restoreSavedHistoryBreakdown(f.sessionID) },
+		func() { indexErr = a.syncRunSessionIndex(f.sessionID, f.syncIndex) },
+		func() { a.invalidateGitStatus(f.workspace) },
 	)
+	if err := errors.Join(historyErr, indexErr); err != nil {
+		message := "save session checkpoint: " + err.Error()
+		if outcome.message != "" {
+			message = outcome.message + "; " + message
+		}
+		outcome.kind, outcome.message = "error", message
+	}
 	// These stay in order: record the result, announce it, then free the run.
 	a.recordRunOutcome(f.runID, f.sessionID, outcome)
 	a.emitRunEnd(f, outcome)
@@ -1857,13 +1858,15 @@ func (a *App) finishRun(f runFinish, messages []openai.ChatCompletionMessage, ou
 }
 
 // syncRunSessionIndex refreshes the index only for runs without a UI writer.
-func (a *App) syncRunSessionIndex(sessionID string, needed bool) {
+func (a *App) syncRunSessionIndex(sessionID string, needed bool) error {
 	if !needed {
-		return
+		return nil
 	}
 	if err := a.syncSessionIndexFromHistory(sessionID); err != nil {
 		a.logAppError("session index sync failed", "sessionId", sessionID, "error", err.Error())
+		return err
 	}
+	return nil
 }
 
 // recordRunOutcome keeps the result that /result and status queries read.
@@ -1900,10 +1903,7 @@ func (a *App) emitRunEnd(f runFinish, outcome runOutcome) {
 	a.emit(outcome.event(), payload)
 }
 
-// releaseRun drops the run's live registrations. The input queue is dropped,
-// not closed: closing a channel while a concurrent InjectRunMessage is sending
-// would panic, and dropping the only reference lets the channel (plus any
-// queued messages) be GC'd with the run.
+// releaseRun drops live registrations after finishRun has stopped input admission.
 func (a *App) releaseRun(runID string) {
 	a.mu.Lock()
 	delete(a.runs, runID)
@@ -1942,9 +1942,16 @@ func (a *App) InjectRunMessage(runID string, text string, attachments ...Attachm
 // drainPendingInputs non-blockingly takes every queued injected message for a
 // run, in arrival order.
 func (a *App) drainPendingInputs(runID string) []runInput {
+	return a.drainRunInputs(runID, false)
+}
+
+func (a *App) drainRunInputs(runID string, stop bool) []runInput {
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	ch := a.runInputs[runID]
-	a.mu.Unlock()
+	if stop {
+		delete(a.runInputs, runID)
+	}
 	if ch == nil {
 		return nil
 	}
@@ -1957,6 +1964,18 @@ func (a *App) drainPendingInputs(runID string) []runInput {
 			return out
 		}
 	}
+}
+
+// The final empty-queue check and closing admission share InjectRunMessage's
+// lock. A racing send either enters the next step or gets a retryable conflict.
+func (a *App) closeRunInputIfEmpty(runID string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.runInputs[runID]) != 0 {
+		return false
+	}
+	delete(a.runInputs, runID)
+	return true
 }
 
 // appendPendingRunInputs gives queued attachments the same durable editing
@@ -2031,7 +2050,6 @@ func (a *App) releaseSession(sessionID string, deleteHistory bool) error {
 	delete(a.sessionRunOutcomes, sessionID)
 	delete(a.contextAnchors, sessionID)
 	delete(a.compactFailures, sessionID)
-	delete(a.readCaches, sessionID)
 	delete(a.contextLocks, sessionID)
 	a.mu.Unlock()
 
@@ -2285,10 +2303,6 @@ func (a *App) runChat(ctx context.Context, runID string, req ChatRequest, cfg Co
 	toolEventMeta := func(name string) map[string]any { return a.toolEventMeta(ctx, name) }
 	toolSchemaTokens := estimateToolSchemaTokens(tools)
 	breakdownAcc := newLiveBreakdownAccumulator(messages)
-	// Read de-duplication is scoped to the session, not to this run: a file range
-	// the conversation already carries is omitted instead of re-sent, until a
-	// history rewrite (see sessionReadCache) drops it.
-	readCache := a.sessionReadCacheFor(sessionID)
 
 	a.syncCommandContext(sessionID, messages)
 	syncBreakdown := func(msgs []openai.ChatCompletionMessage, resetAcc bool) ContextBreakdown {
@@ -2587,6 +2601,9 @@ func (a *App) runChat(ctx context.Context, runID string, req ChatRequest, cfg Co
 				}
 			}
 			// finishRun saves this history, then emits run:done.
+			if !a.closeRunInputIfEmpty(runID) {
+				continue
+			}
 			end = runOutcome{kind: "done"}
 			return
 		}
@@ -2650,7 +2667,6 @@ func (a *App) runChat(ctx context.Context, runID string, req ChatRequest, cfg Co
 				runID: runID, sessionID: sessionID, toolBatchID: toolBatchID,
 				toolCallIndex: idx, toolCallID: c.ID, toolName: c.Function.Name, toolArgs: c.Function.Arguments,
 			})
-			toolCtx = context.WithValue(toolCtx, sessionReadCacheContextKey{}, readCache)
 			toolCtx = withBlackboardReservation(toolCtx, blackboardNames[idx])
 			return a.executeTool(toolCtx, toolCfg, sessionID, c.Function.Name, []byte(executionArgs))
 		}
@@ -2729,6 +2745,9 @@ func (a *App) runChat(ctx context.Context, runID string, req ChatRequest, cfg Co
 				continue
 			}
 			// finishRun saves this history, then emits run:done.
+			if !a.closeRunInputIfEmpty(runID) {
+				continue
+			}
 			end = runOutcome{kind: "done"}
 			return
 		}
@@ -2846,7 +2865,7 @@ func (a *App) executeTool(ctx context.Context, cfg ConfigState, sessionID, name 
 		}
 	case "edit":
 		// The model-facing request is the flat FileTextEdits itself: exactly
-		// one file per call, path/version/changes at the top level. Multi-file
+		// one file per call, path/changes at the top level. Multi-file
 		// changes are parallel edit calls in one model response. Truncated
 		// arguments never reach this case: prepareToolCallsForExecution has
 		// already rewritten them to the truncation marker, which fails above
@@ -2895,7 +2914,6 @@ func (a *App) executeTool(ctx context.Context, cfg ConfigState, sessionID, name 
 		if err == nil {
 			data, err = a.runCommandWithConfig(ctx, cfg, req)
 			if err == nil {
-				argWarnings = append(argWarnings, localCommandToolWarnings(req.Command)...)
 				a.invalidateWorkspaceMapCache(cfg)
 			}
 		}
@@ -2994,12 +3012,12 @@ func (a *App) executeTool(ctx context.Context, cfg ConfigState, sessionID, name 
 		var req RemoteReadFileRequest
 		err, argWarnings = decodeJSON(&req)
 		if err == nil {
-			res, rerr := a.remoteReadFileCached(ctx, req)
+			res, rerr := a.remoteReadFile(ctx, req)
 			res.RemoteAlias = strings.TrimSpace(req.Alias)
 			data, err = res, rerr
 		}
 	case "remote_edit":
-		// Flat single-file request: target + the same path/version/changes as
+		// Flat single-file request: target + the same path/changes as
 		// local edit. Truncated arguments are rejected upstream the same way
 		// as edit (E_TRUNCATED_ARGS marker), so only complete JSON lands here.
 		var req RemoteEditRequest
@@ -3042,21 +3060,11 @@ func (a *App) executeTool(ctx context.Context, cfg ConfigState, sessionID, name 
 		if err == nil {
 			data, err = a.executeRemoteTransfer(ctx, req)
 		}
-	case "grep":
-		var reqGF GrepRequest
-		err, argWarnings = decodeJSON(&reqGF)
-		if err == nil {
-			data, err = a.grepFilesWithConfig(ctx, cfg, reqGF)
-		}
 	case "read":
 		var reqBR BatchReadRequest
 		err, argWarnings = decodeJSON(&reqBR)
 		if err == nil {
-			if cache, ok := ctx.Value(sessionReadCacheContextKey{}).(*sessionReadCache); ok {
-				data, err = cache.readContext(ctx, a, cfg, reqBR)
-			} else {
-				data, err = a.batchReadFilesWithContext(ctx, cfg, reqBR)
-			}
+			data, err = a.batchReadFilesWithContext(ctx, cfg, reqBR)
 		}
 
 	case "calculate":
@@ -3096,12 +3104,6 @@ func (a *App) executeTool(ctx context.Context, cfg ConfigState, sessionID, name 
 			if err == nil {
 				defer a.releaseSubagentSlot()
 				subCtx, cancel := context.WithCancel(ctx)
-				// Sub-agents build a fresh model context and never saw the parent
-				// session's read content, so sharing that session's read cache would
-				// hand them a "content already returned" receipt for content they
-				// never received. Give each sub-agent a private cache so dedup only
-				// applies within its own reads.
-				subCtx = context.WithValue(subCtx, sessionReadCacheContextKey{}, newSessionReadCache())
 				defer cancel()
 				res, delegateErr := a.executeDelegate(subCtx, cfg, sessionID, adReq)
 				if delegateErr != nil {
@@ -3900,9 +3902,9 @@ func violationPath(v schemautil.Violation) string {
 
 // toolArgDecodeError renders a failed tool-argument decode for the model. The
 // declared schema is the only source that names the problem in the model's own
-// vocabulary ("changes[0].lineRange.start: must be integer, got string"); the
+// vocabulary ("changes[0].oldText: must be string, got number"); the
 // raw encoding/json error is never echoed because it names internal Go structs
-// ("FileTextEdits.changes.0.lineRange.start of type int") and carries no code.
+// ("FileTextEdits.changes.0.oldText of type string") and carries no code.
 // The schema gate further down never sees this failure — decoding runs first —
 // so the code has to be attached here.
 func toolArgDecodeError(name string, args []byte, err error) error {
@@ -3968,7 +3970,7 @@ func decodeToolArguments(name string, args []byte, v any) (error, []string) {
 		// calls look as if they had exhausted max_tokens.
 		if isIncompleteStreamJSON(err) {
 			if name == "edit" || name == "replace_exact" || name == "replace_lines" || name == "remote_edit" {
-				return fmt.Errorf("tool arguments JSON was truncated (output cut off or stream interrupted). Merge small changes into one edit call; split large changes (a whole function or section) into separate edit calls; use lineRange (start/end plus the exact startText/endText of those lines) for large deletions or replacements of a contiguous line range: %w", err), nil
+				return fmt.Errorf("tool arguments JSON was truncated (output cut off or stream interrupted). Resend complete JSON with focused oldText/newText changes; include enough source context to make each target unique: %w", err), nil
 			}
 			return fmt.Errorf("tool arguments JSON was truncated (output cut off or stream interrupted): %w", err), nil
 		}
@@ -4022,15 +4024,14 @@ func decodeToolArguments(name string, args []byte, v any) (error, []string) {
 	// repair above still lands, and so every keyword the declaration uses
 	// (required, ranges, patterns, enum, const) is enforced exactly as written.
 	//
-	// Undeclared keys are the one exception: no handler reads them, so they are
-	// dropped and named in a warning instead of failing the call. Failing cost
-	// the model a whole round trip to fix a key nothing downstream would use.
+	// Undeclared keys are normally dropped with a warning. Edits reject them:
+	// silently ignoring a removed constraint could change the replacement scope.
 	if schema, ok := toolshared.BuiltinSchema(name); ok {
 		violations := schemautil.ValidateArgs(schema, cur)
 		ignored := make([]string, 0, len(violations))
 		fatal := make([]schemautil.Violation, 0, len(violations))
 		for _, violation := range violations {
-			if violation.UnsupportedKey == "" {
+			if violation.UnsupportedKey == "" || name == "edit" || name == "remote_edit" {
 				fatal = append(fatal, violation)
 				continue
 			}

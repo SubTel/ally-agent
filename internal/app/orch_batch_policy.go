@@ -40,7 +40,7 @@ func isFileMutationTool(name string) bool {
 }
 
 // planWorkTools are the tools whose successful call means the run did work a
-// plan could have moved past. Reads (read, grep, list_files, web_fetch, …) leave
+// plan could have moved past. Reads (read, list_files, web_fetch, …) leave
 // the plan where it is and must not make the end-of-run plan check fire, and the
 // file-mutation tools are read from the mutation classifier above instead of being
 // repeated here, so a new mutation tool cannot be forgotten in one of two lists.
@@ -80,7 +80,7 @@ func detectWriteBatchConflicts(cfg ConfigState, calls []openai.ToolCall) map[int
 		// sees which call won and re-sends the skipped change in a later
 		// response once it knows the path's new state.
 		for _, ref := range refs[1:] {
-			conflicts[ref.index] = codedToolError("E_WRITE_BATCH_CONFLICT", fmt.Errorf("another file mutation for %s appears earlier in the same stage; only the first one executes. This call was skipped — wait for that mutation's result, then re-read the file (or reuse its returned version) and re-send this change in a later response if it is still needed", refs[0].display))
+			conflicts[ref.index] = codedToolError("E_WRITE_BATCH_CONFLICT", fmt.Errorf("another file mutation for %s appears earlier in the same stage; only the first one executes. This call was skipped — wait for that mutation's result, then re-send this change in a later response using current source text if it is still needed", refs[0].display))
 		}
 	}
 	return conflicts
@@ -289,32 +289,27 @@ func fileMutationTargets(cfg ConfigState, name, arguments string) []fileMutation
 		return plan.Targets
 	}
 	if name == "remote_transfer" {
-		var transArgs struct {
-			Alias      string `json:"alias"`
-			Action     string `json:"action"`
-			LocalPath  string `json:"localPath"`
-			RemotePath string `json:"remotePath"`
-		}
+		var transArgs RemoteTransferRequest
 		if json.Unmarshal([]byte(arguments), &transArgs) != nil {
 			return nil
 		}
 		action := strings.ToLower(strings.TrimSpace(transArgs.Action))
-		switch action {
-		case "upload":
-			target := strings.TrimSpace(transArgs.Alias)
-			cleanPath := path.Clean(strings.ReplaceAll(strings.TrimSpace(transArgs.RemotePath), "\\", "/"))
-			if cleanPath != "" && cleanPath != "." {
-				return []fileMutationTarget{{
-					key:     remoteMutationKey(target, cleanPath),
-					display: target + " · " + cleanPath,
-				}}
-			}
-		case "download":
-			if target, ok := localMutationTarget(cfg, transArgs.LocalPath); ok {
-				return []fileMutationTarget{target}
+		var targets []fileMutationTarget
+		for _, file := range transArgs.Files {
+			switch action {
+			case "upload":
+				target := strings.TrimSpace(transArgs.Alias)
+				cleanPath := path.Clean(strings.ReplaceAll(strings.TrimSpace(file.RemotePath), "\\", "/"))
+				if cleanPath != "" && cleanPath != "." {
+					targets = append(targets, fileMutationTarget{key: remoteMutationKey(target, cleanPath), display: target + " · " + cleanPath})
+				}
+			case "download":
+				if target, ok := localMutationTarget(cfg, file.LocalPath); ok {
+					targets = append(targets, target)
+				}
 			}
 		}
-		return nil
+		return targets
 	}
 	// delete tools take a `paths` list; single-file tools (create, remote_edit,
 	// remote_create_file) carry one `path`. The two shapes are read on separate
@@ -440,7 +435,7 @@ type localEditBatchPlan struct {
 // planLocalEditBatch is the single normalization boundary shared by outer
 // tool-batch conflict detection and the local edit executor. Repeated aliases
 // of one physical path become one file plan and preserve the first display
-// path. All changes remain relative to the same original version snapshot.
+// path. All changes remain relative to the same original contents.
 func planLocalEditBatch(cfg ConfigState, files []FileTextEdits, mode localEditPlanMode) (localEditBatchPlan, error) {
 	if mode == localEditPlanForExecution {
 		if len(files) == 0 {
@@ -488,9 +483,6 @@ func planLocalEditBatch(cfg ConfigState, files []FileTextEdits, mode localEditPl
 		}
 		if existingIndex, exists := byTarget[target.key]; exists {
 			existing := &plan.Files[existingIndex]
-			if mode == localEditPlanForExecution && !strings.EqualFold(existing.Edit.Version, file.Version) {
-				return localEditBatchPlan{}, withEditFileError(file.Path, codedToolError("E_VERSION_MISMATCH", fmt.Errorf("duplicate edit entries for %s use different versions (%s and %s); re-read the file and submit one version", file.Path, existing.Edit.Version, file.Version)))
-			}
 			existing.Edit.Changes = append(existing.Edit.Changes, file.Changes...)
 			continue
 		}
@@ -499,7 +491,6 @@ func planLocalEditBatch(cfg ConfigState, files []FileTextEdits, mode localEditPl
 		plan.Files = append(plan.Files, localEditFilePlan{
 			Edit: FileTextEdits{
 				Path:    file.Path,
-				Version: file.Version,
 				Changes: append([]TextChange(nil), file.Changes...),
 			},
 			ResolvedPath: resolved,

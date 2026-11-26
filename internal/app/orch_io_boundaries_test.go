@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"ally-dev/internal/tools/edit"
 	"ally-dev/internal/tools/read"
 	openai "github.com/sashabaranov/go-openai"
 )
@@ -46,7 +45,7 @@ func TestEditCancellationWhileQueuedNeverWrites(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(a.config.Workspace, path), []byte("old\n"), 0600); err != nil {
 					t.Fatal(err)
 				}
-				raw, err := json.Marshal(FileTextEdits{Path: path, Version: hashVersion([]byte("old\n")), Changes: []TextChange{{OldText: "old", NewText: "new"}}})
+				raw, err := json.Marshal(FileTextEdits{Path: path, Changes: []TextChange{{OldText: "old", NewText: "new"}}})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -105,7 +104,7 @@ func TestEditUnreadableEncodingLeavesAllSourcesUntouched(t *testing.T) {
 		original []byte
 		change   TextChange
 	}{
-		{"BOMless UTF16", []byte{'a', 0, '\n', 0, 0x49, 0x6c, 0x57, 0x5b, '\n', 0}, TextChange{LineRange: &edit.LineRange{Start: 1, End: 2, StartText: "a", EndText: "汉字"}, NewText: "汉字"}},
+		{"BOMless UTF16", []byte{'a', 0, '\n', 0, 0x49, 0x6c, 0x57, 0x5b, '\n', 0}, TextChange{OldText: "a\n汉字\n", NewText: "汉字"}},
 		{"UTF8 NUL", []byte("old\n"), TextChange{OldText: "old", NewText: "a\x00b"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -118,7 +117,7 @@ func TestEditUnreadableEncodingLeavesAllSourcesUntouched(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			req := FileTextEdits{Path: "source.txt", Version: hashVersion(decoded), Changes: []TextChange{tc.change}}
+			req := FileTextEdits{Path: "source.txt", Changes: []TextChange{tc.change}}
 			raw, err := json.Marshal(req)
 			if err != nil {
 				t.Fatal(err)
@@ -131,7 +130,7 @@ func TestEditUnreadableEncodingLeavesAllSourcesUntouched(t *testing.T) {
 			if err := os.WriteFile(peerPath, []byte("old\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			peerRaw, err := json.Marshal(FileTextEdits{Path: "peer.txt", Version: hashVersion([]byte("old\n")), Changes: []TextChange{{OldText: "old", NewText: "new"}}})
+			peerRaw, err := json.Marshal(FileTextEdits{Path: "peer.txt", Changes: []TextChange{{OldText: "old", NewText: "new"}}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -148,7 +147,8 @@ func TestEditUnreadableEncodingLeavesAllSourcesUntouched(t *testing.T) {
 			// A cancelled transport ensures even a regression cannot contact a host.
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
-			_, err = a.remoteEditOne(ctx, remoteTarget{Host: "example.invalid"}, req, remoteRawFile{Path: req.Path, Data: decoded, RawData: tc.original, Size: int64(len(tc.original))})
+			rt := remoteTarget{Host: "example.invalid"}
+			_, err = a.remoteEditOne(ctx, rt, req, remoteRawFile{Path: req.Path, Data: decoded, RawData: tc.original, Size: int64(len(tc.original))})
 			if toolErrorCode(err) != "E_EDIT_ENCODING" {
 				t.Fatalf("remote edit bypassed shared encoding gate: %v", err)
 			}

@@ -32,9 +32,7 @@ import (
 type CalculateRequest = calculatetool.Request
 type CalculateResult = calculatetool.Result
 
-// Grep type aliases keep the historical app-package names in the Wails
-// bindings while the implementations live in internal/tools/grep.
-type GrepRequest = grep.Request
+// Grep result aliases are retained for historical search cards.
 type GrepFileMatch = grep.LineFileMatch
 type GrepFileCount = grep.FileCount
 type GrepResult = grep.Result
@@ -244,20 +242,6 @@ func safeWriteFile(path string, data []byte, perm os.FileMode) error {
 
 func safeWriteNewFile(path string, data []byte, perm os.FileMode) error {
 	return read.SafeWriteNewFile(path, data, perm)
-}
-
-// hashBytesAndVersion hashes data once and returns both the hex digest and the
-// version token, so a large file is SHA-256'd once per call instead of twice.
-func hashBytesAndVersion(data []byte) (string, string) {
-	return read.HashBytesAndVersion(data)
-}
-
-// hashFileAndVersion streams the file at path through SHA-256 and returns the
-// same (hex digest, version token) pair hashBytesAndVersion produces. Used where
-// the caller must not read the file into memory (an image above
-// maxReadImageBytes is hashed but never buffered).
-func hashFileAndVersion(path string) (string, string, error) {
-	return read.HashFileAndVersion(path)
 }
 
 func newID() string {

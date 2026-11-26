@@ -31,8 +31,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"ally-dev/internal/tools/command"
 	"ally-dev/internal/tools/pathutil"
+	"ally-dev/internal/tools/read"
 	toolshared "ally-dev/internal/tools/shared"
 )
 
@@ -62,7 +62,6 @@ func (a *App) createFileWithConfig(cfg ConfigState, req CreateFileRequest) (Edit
 
 	before := []byte{}
 	beforeHash := ""
-	beforeVersion := ""
 	perm := os.FileMode(0o644)
 	exists := false
 	if info, err := os.Lstat(path); err == nil {
@@ -74,7 +73,7 @@ func (a *App) createFileWithConfig(cfg ConfigState, req CreateFileRequest) (Edit
 			return EditResult{}, codedToolError("E_TARGET_IS_DIRECTORY", fmt.Errorf("path is a directory: %s", req.Path))
 		}
 		if !req.Overwrite {
-			return EditResult{}, codedToolError("E_EXISTS", fmt.Errorf("file already exists: %s; read it and use edit with its current version to change it", req.Path))
+			return EditResult{}, codedToolError("E_EXISTS", fmt.Errorf("file already exists: %s; use edit to change it", req.Path))
 		}
 		if blocked, reason := blockedSensitiveRead(path); blocked {
 			return EditResult{}, codedToolError("E_PROTECTED_PATH", errors.New(reason))
@@ -83,7 +82,7 @@ func (a *App) createFileWithConfig(cfg ConfigState, req CreateFileRequest) (Edit
 		if err != nil {
 			return EditResult{}, codedToolError("E_TEXT_OVERWRITE", fmt.Errorf("refusing to overwrite non-text or unreadable file %s: %w", req.Path, err))
 		}
-		beforeHash, beforeVersion = hashBytesAndVersion(before)
+		beforeHash = read.HashBytes(before)
 		perm = info.Mode().Perm()
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return EditResult{}, err
@@ -106,7 +105,7 @@ func (a *App) createFileWithConfig(cfg ConfigState, req CreateFileRequest) (Edit
 	// encoded because safeWriteFileWithDir writes encoded verbatim, and for
 	// new files safeWriteNewFile does the same. Using encoded directly also
 	// avoids a second hash pass on the same content.
-	result := makeEditResult(req.Path, beforeHash, beforeVersion, before, encoded, ending, 1, string(before), content)
+	result := makeEditResult(req.Path, beforeHash, before, encoded, ending, 1, string(before), content)
 	created := !exists
 	result.Created = &created
 	if len(createdDirs) > 0 {
@@ -560,18 +559,6 @@ func planDeletePath(roots []string, requestPath string, recursive bool) (planned
 		return plannedDeletePath{}, err
 	}
 	return plannedDeletePath{absPath: path, isDir: info.IsDir(), result: result}, nil
-}
-
-// Only executable positions count: quoted text and options such as git
-// log --grep must not trigger a search-tool reminder.
-func localCommandToolWarnings(commandLine string) []string {
-	for _, invocation := range command.Invocations(commandLine) {
-		switch invocation.Name {
-		case "grep", "egrep", "fgrep":
-			return []string{toolshared.ContentSearchGuidance}
-		}
-	}
-	return nil
 }
 
 func (a *App) runCommandWithConfig(parent context.Context, cfg ConfigState, req CommandRequest) (CommandResult, error) {
@@ -1332,7 +1319,7 @@ func deleteTargetKind(info os.FileInfo) string {
 	return "other"
 }
 
-func makeEditResult(rel string, beforeHash, beforeVersion string, before, after []byte, ending string, replacements int, beforeText, afterText string) EditResult {
+func makeEditResult(rel string, beforeHash string, before, after []byte, ending string, replacements int, beforeText, afterText string) EditResult {
 	beforeLines, _ := splitLines(beforeText)
 	afterLines, _ := splitLines(afterText)
 	added := len(afterLines) - len(beforeLines)
@@ -1341,20 +1328,18 @@ func makeEditResult(rel string, beforeHash, beforeVersion string, before, after 
 		removed = -added
 		added = 0
 	}
-	afterHash, afterVersion := hashBytesAndVersion(after)
+	afterHash := read.HashBytes(after)
 	return EditResult{
-		Path:          filepath.ToSlash(rel),
-		BeforeSHA256:  beforeHash,
-		AfterSHA256:   afterHash,
-		BeforeVersion: beforeVersion,
-		Version:       afterVersion,
-		BeforeBytes:   len(before),
-		AfterBytes:    len(after),
-		Replacements:  replacements,
-		AddedLines:    added,
-		RemovedLines:  removed,
-		LineEnding:    ending,
-		Summary:       fmt.Sprintf("%s updated: %d -> %d bytes", filepath.ToSlash(rel), len(before), len(after)),
+		Path:         filepath.ToSlash(rel),
+		BeforeSHA256: beforeHash,
+		AfterSHA256:  afterHash,
+		BeforeBytes:  len(before),
+		AfterBytes:   len(after),
+		Replacements: replacements,
+		AddedLines:   added,
+		RemovedLines: removed,
+		LineEnding:   ending,
+		Summary:      fmt.Sprintf("%s updated: %d -> %d bytes", filepath.ToSlash(rel), len(before), len(after)),
 	}
 }
 

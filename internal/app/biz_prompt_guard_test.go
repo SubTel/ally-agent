@@ -46,8 +46,6 @@ var promptNonToolTokens = map[string]bool{
 	"alias": true, "changes": true, "done": true, "files": true, "finish": true,
 	"in_progress": true, "next": true, "offset": true, "path": true, "step_limit": true,
 	"pending": true, "steps": true, "stage": true, "validation": true, "version": true,
-	// edit lineRange fields named in guidance
-	"end": true, "endText": true, "start": true, "startText": true,
 	// frontmatter fields and IO nouns named in guidance
 	"aliases": true, "date": true, "description": true, "output": true,
 	"role": true, "source": true, "tags": true, "task": true, "title": true,
@@ -76,7 +74,7 @@ func TestSystemPromptToolReferencesExist(t *testing.T) {
 	registry := builtinToolNames(t)
 	prompts := map[string]string{
 		"main":      joinSystemPromptParts(app.buildSystemPromptParts(nil, "", nil, "", "", nil)),
-		"sub-agent": subagentSystemPrompt(""),
+		"sub-agent": subagentSystemPrompt("", ConfigState{}),
 	}
 	unknown := map[string]bool{}
 	for label, prompt := range prompts {
@@ -103,7 +101,7 @@ func TestSystemPromptToolReferencesExist(t *testing.T) {
 // sub-agent to use tools it never receives. Explicit prohibition lines
 // ("- Do not call `subagent` — ...") are the only allowed mentions.
 func TestSubagentPromptDoesNotAdvertiseBlockedTools(t *testing.T) {
-	sub := subagentSystemPrompt("")
+	sub := subagentSystemPrompt("", ConfigState{})
 	for name := range subagentBlockedTools {
 		for _, line := range strings.Split(sub, "\n") {
 			trimmed := strings.TrimSpace(line)

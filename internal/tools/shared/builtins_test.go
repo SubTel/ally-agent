@@ -263,12 +263,6 @@ func schemaRequiredForTest(t *testing.T, object map[string]any, field string) bo
 //
 //   - tailLines=0 and body="" mean "not provided" to the runtime, so pairing
 //     them with the other form must not read as "both forms were requested".
-//   - A blank source (oldText="", lineRange="") is "not provided" too, so a
-//     padded blank beside a real source is carried out, while a change with no
-//     real source at all is still refused, because no branch matches.
-//   - Two real sources are refused, and replaceAll beside lineRange is refused
-//     by the change object's allOf/not rule; the runtime applies the same two
-//     rules, so no call can pass the gate and fail the executor.
 func TestBuiltinGateTreatsEmptyOptionalsAsAbsent(t *testing.T) {
 	tooManyPaths := func() string {
 		parts := make([]string, DeletePathListLimit+1)
@@ -286,16 +280,15 @@ func TestBuiltinGateTreatsEmptyOptionalsAsAbsent(t *testing.T) {
 		wantAbsent   string
 	}{
 		{"read pads tailLines with 0", "read", `{"files":[{"path":"a.go","startLine":5,"endLine":20,"tailLines":0}]}`, false, "", ""},
-		{"edit accepts a single-line range", "edit", `{"path":"a.go","version":"9k3m7x","changes":[{"lineRange":{"start":12,"startText":"line"},"newText":"x"}]}`, false, "", ""},
-		{"remote_edit accepts a single-line range", "remote_edit", `{"alias":"t:/w","path":"a.go","version":"9k3m7x","changes":[{"lineRange":{"start":12,"startText":"line"},"newText":"x"}]}`, false, "", ""},
-		{"edit accepts a pinned span", "edit", `{"path":"a.go","version":"9k3m7x","changes":[{"lineRange":{"start":1,"end":9,"startText":"a","endText":"b"},"newText":"x"}]}`, false, "", ""},
-		{"edit pads oldText with an empty string", "edit", `{"path":"a.go","version":"9k3m7x","changes":[{"lineRange":{"start":1,"end":9,"startText":"a","endText":"b"},"newText":"x","oldText":""}]}`, false, "", ""},
-		{"edit pads lineRange with null", "edit", `{"path":"a.go","version":"9k3m7x","changes":[{"oldText":"a","newText":"x","lineRange":null}]}`, false, "", ""},
-		{"edit refuses a range without start", "edit", `{"path":"a.go","version":"9k3m7x","changes":[{"lineRange":{"startText":"a"},"newText":"x"}]}`, true, "start", ""},
-		{"edit refuses a range without startText", "edit", `{"path":"a.go","version":"9k3m7x","changes":[{"lineRange":{"start":3},"newText":"x"}]}`, true, "startText", ""},
-		{"remote_edit pads lineRange with null", "remote_edit", `{"alias":"t:/w","path":"a.go","version":"9k3m7x","changes":[{"oldText":"a","newText":"x","lineRange":null}]}`, false, "", ""},
+		{"edit accepts deletion", "edit", `{"path":"a.go","changes":[{"oldText":"a","newText":""}]}`, false, "", ""},
+		{"remote_edit accepts replaceAll", "remote_edit", `{"alias":"dev","path":"/a.go","changes":[{"oldText":"a","newText":"x","replaceAll":true}]}`, false, "", ""},
+		{"edit requires oldText", "edit", `{"path":"a.go","changes":[{"newText":"x"}]}`, true, "oldText", ""},
+		{"remote_edit requires oldText", "remote_edit", `{"alias":"dev","path":"/a.go","changes":[{"newText":"x"}]}`, true, "oldText", ""},
+		{"edit rejects empty oldText", "edit", `{"path":"a.go","changes":[{"oldText":"","newText":"x"}]}`, true, "oldText", ""},
+		{"remote_edit rejects empty oldText", "remote_edit", `{"alias":"dev","path":"/a.go","changes":[{"oldText":"","newText":"x"}]}`, true, "oldText", ""},
+		{"edit rejects removed scope", "edit", `{"path":"a.go","changes":[{"oldText":"a","newText":"x","lineRange":{"start":1}}]}`, true, "lineRange", ""},
+		{"remote_edit rejects removed scope", "remote_edit", `{"alias":"dev","path":"/a.go","changes":[{"oldText":"a","newText":"x","lineRange":{"start":1}}]}`, true, "lineRange", ""},
 		{"http_request pads body with an empty string", "fetch", `{"url":"https://example.test","body":"","json":{"a":1}}`, false, "", ""},
-		{"grep pads outputMode with an empty string", "grep", `{"pattern":"x","outputMode":""}`, false, "", ""},
 		{"remote_run_command pads shell with an empty string", "remote_run_command", `{"alias":"t:/w","command":"ls","shell":""}`, false, "", ""},
 		// The local delete takes paths only: a list of entries is the one way to name
 		// a target, and the gate refuses the path key outright.

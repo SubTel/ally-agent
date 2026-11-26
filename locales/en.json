@@ -1,4 +1,9 @@
 {
+  "ui_1c87b4613673": "Plan snapshot",
+  "ui_dc9591e56d50": "In progress",
+  "ui_5b715411b1f9": "Pending",
+  "ui_707ff823ca87": "%d earlier steps omitted",
+  "ui_01fb3a24e08c": "%d later steps omitted",
   "ui_nav_position": "Navigation",
   "ui_nav_note": "The sidebar stays on the left; the top menu hides it and opens the menu from the button beside the logo.",
   "ui_nav_sidebar": "Sidebar",
@@ -223,6 +228,7 @@
   "ui_bdd4e62059e6": "Today is %[1]d month %[2]d day %[3]s, now it is %02[4]d:%02[5]d. %[6]s, let’s put our attention back to the present and solve the most important thing first.",
   "ui_5c9cf5e0dd47": "Today",
   "ui_9cac78290c7c": "From \"",
+  "ui_a5215e953bb3": "Copied from \"%[1]s\"; enter the API Key again, and the Model ID must differ from the source.",
   "ui_19a8a28fc696": "Install from the plug-in source code directory anywhere on the machine",
   "ui_73686cb94d4d": "Install from directory",
   "ui_b9af2de88d90": "Proxy address",
@@ -523,6 +529,7 @@
   "ui_f33083f276e4": "Failed to copy workspace path:",
   "ui_e543a676d077": "Copy summary",
   "ui_8a3b0be2f535": "Copy question",
+  "ui_4429a06d3cb4": "Copy model",
   "ui_0b28fc7ccbd4": "Copy files",
   "ui_7dde3fc31529": "Failed to copy file:",
   "ui_02bcdbc5a145": "Copy relative path",
@@ -1830,5 +1837,10 @@
   "ui_context_mcp_catalog": "MCP tool catalog",
   "ui_context_mcp_catalog_note": "Load the MCP tool catalog; full definitions are queried on demand. Connections and tool execution permissions are unchanged.",
   "ui_context_budget_note": "Automatic context is limited to %d KiB in total. Exceeding it reports an error rather than silently dropping project rules or catalog entries.",
-  "ui_context_budget_error": "Automatic context exceeds %d KiB; no model request was sent. Shorten project instructions, custom instructions or catalogs, or disable unnecessary context sources in Settings and start a new session. Rules and catalog entries are not silently dropped."
+  "ui_context_budget_error": "Automatic context exceeds %d KiB; no model request was sent. Shorten project instructions, custom instructions or catalogs, or disable unnecessary context sources in Settings and start a new session. Rules and catalog entries are not silently dropped.",
+  "ui_context_tool_calls": "Calls",
+  "ui_context_tool_call_tokens": "Call",
+  "ui_context_tool_result_tokens": "Result",
+  "ui_context_unknown_tool": "Unknown tool",
+  "ui_context_tool_usage_note": "Current context estimates; calls include arguments and count toward AI replies"
 }

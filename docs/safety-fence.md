@@ -23,7 +23,7 @@ flowchart TB
   subgraph L["本地"]
     direction TB
     L1["写：圈内 → 软链"]:::core --> L2["删：圈内 → 圈根 → 数据目录 → 临时豁免 → 盘根/1级/2级 → 点名名单 → recursive"]:::ev
-    L2 --> L3["命令：四项（裸删改道 / 凭据禁读 / 圈外已存在目标 / 高危语义）"]:::exec
+    L2 --> L3["命令：禁用 grep / 裸删改道 / 凭据禁读 / 圈外已存在目标 / 高危语义"]:::exec
     L1 --> L4["读：路径解析 → 凭据 → 文档 → 二进制/大小/目录"]:::prov
   end
   subgraph R["远端"]
@@ -69,7 +69,7 @@ flowchart TB
 | create 未给 overwrite | 拒 `E_BAD_ARGS` | 必须明确指定是否覆盖 |
 | `src/x.go` 已存在、create 设置 `overwrite: false` | 拒 `E_EXISTS` | |
 | `src/x.png` 覆盖非文本文件 | 拒 `E_TEXT_OVERWRITE` | |
-| edit 用旧 version | 拒 `E_VERSION_MISMATCH` | 要重新 read |
+| edit 使用已知当前文本 | 按 oldText 匹配并编辑 | 无需先调用 read，不传 version |
 | `.git/hooks/pre-commit` | 允许 | 按普通文件处理 |
 | `link.txt`（软链） | 目标在可写范围内时允许 | 编辑真实目标并保留链接；仍检查凭据禁读和路径边界 |
 | `~\.ally_agent\memories\a.md` | 允许 | 兜底白名单 |
@@ -90,15 +90,16 @@ flowchart TB
 | `a.bin`（含 NUL） | 拒 `E_BINARY_FILE` | |
 | `big.tar.gz`（40 MB） | 拒 `E_FILE_TOO_LARGE` | 上限 32 MiB |
 | `frontend`（目录） | 拒 `E_IS_DIRECTORY` | |
-| grep `~\.ssh` | 拒 | 凭据位置不搜 |
-| grep `C:\Windows` | 拒 `E_SEARCH_ROOT_BLOCKED` | 系统目录 |
-| grep `C:\Users\DELL` | 拒 | 家目录本身 |
-| grep `D:\other\repo` | 允许 | 圈外普通目录不在危险名单 |
+| `rg -e pattern -- ~/.ssh` | 拒 `E_PROTECTED_PATH` | 凭据位置不搜 |
+| 目录浏览 `C:\Windows` | 拒 `E_SEARCH_ROOT_BLOCKED` | 系统目录 |
+| 目录浏览 `C:\Users\DELL` | 拒 | 家目录本身 |
+| `rg -e pattern -- D:/other/repo` | 允许 | 普通目录可通过 command 搜索 |
 
 ### 命令
 
 | 命令 | 结果 | 原因 |
 |---|---|---|
+| `grep` / `egrep` / `fgrep` | 拒 `E_COMMAND_BLOCKED` | 内容搜索统一用 rg；管道、包装命令和嵌套 shell 同样检查 |
 | `rm -rf frontend` | 拒 `E_COMMAND_BLOCKED` | 裸删改道 delete 工具 |
 | `git rm -r frontend` | 允许 | 管理上下文（同 `docker rm` / `kubectl delete` / `npm uninstall` / `yarn remove`） |
 | `echo x > .git/hooks/pre-commit` | 允许 | 按普通文件处理 |
@@ -123,7 +124,7 @@ flowchart TB
 | 一批 21 个文件 | 拒 | 上限 20；批合计 16 MiB，装不下排下一轮 |
 | 创建 `/srv/app/a/b.txt`（父目录不存在） | 允许 | 自动创建父目录 |
 | 创建已存在文件，overwrite=false | 拒 `E_EXISTS` | 覆盖必须显式指定 overwrite=true |
-| edit 用旧 version / 写入前原文已变 | 拒 `E_VERSION_MISMATCH` | 版本与提交前完整哈希校验保留 |
+| edit 提交期间原文已变 | 拒 `E_EDIT_CONFLICT` | 仅检查本次操作期间的并发修改，不要求 read 版本 |
 | 写 `/srv/app/.git/config` 或指向该位置的软链接 | 允许 | 仓库元数据按普通文件处理 |
 | 删除普通跨目录文件或项目目录 | 允许 | 目录须 recursive=true；保留批内去重及深的先删 |
 | 删除 `/`、`/etc/nginx`、`/var/tmp` | 拒 `E_DELETE_BLOCKED` | 文件系统根、系统二级目录和临时根保护 |
@@ -136,6 +137,7 @@ flowchart TB
 
 | 命令 | 结果 | 原因 |
 |---|---|---|
+| `grep` / `egrep` / `fgrep` | 允许 | 远端默认使用服务器已有的 grep；rg 不是必需依赖 |
 | `cd /srv/app && go test ./...` | 允许 | 调用内自行选择目录 |
 | `echo x >> /etc/nginx/nginx.conf` | 允许 | 不再按“目录外已有目标”拒绝；仍需远端账号权限 |
 | 通过普通软链接写另一个目录 | 允许 | 无项目目录边界 |
@@ -144,24 +146,24 @@ flowchart TB
 | `git rm -r x` | 沿用管理上下文规则 | 不按裸删除处理 |
 | `mkfs.ext4 /dev/sda` 等高危命令 | 拒 | 高危语义检查保留 |
 
-命令保留裸删除和高危语义检查，不再解析写目标来检查 VCS；这些检查不是远端内核沙箱。完整输出日志存放在远端家目录的 `.ally_agent/command-logs`，返回绝对路径，可直接交给同服务器的 remote_read，保留日志配额、首尾预览、超时和取消处理。
+远端命令允许 grep，保留裸删除和高危语义检查，不再解析写目标来检查 VCS；这些检查不是远端内核沙箱。完整输出日志存放在远端家目录的 `.ally_agent/command-logs`，返回绝对路径，可直接交给同服务器的 remote_read，保留日志配额、首尾预览、超时和取消处理。
 
 ### 传输（`remote_transfer`）
 
-`remotePath` 使用绝对路径；`localPath` 仍受本地工作区与凭据保护约束。远端项目目录围栏移除，解包仍限制到本次指定的传输目标，保留 Tar-Slip、归档内软链接逃逸及覆盖开关检查，防止归档夹带其他路径。`.git/.svn/.hg` 按普通目录处理，上传和下载均不跳过。
+只传输普通文件，不支持目录或符号链接源，不使用归档打包和解包。一次调用通过 `files` 提供 1–20 对 `localPath`、`remotePath`，共用同一个 `alias`、`action` 和 `overwrite`。`remotePath` 使用绝对路径；`localPath` 仍受本地工作区与凭据保护约束。两端都必须指定完整目标文件名，不自动拼接目录与源文件名。`.git/.svn/.hg` 内的普通文件与其他文件一样处理。
 
-上传与下载都禁止文件与目录互相替换，即使 `overwrite=true` 也会报错并保留原目标，目录也不能替换已有符号链接。向目录内传文件时必须指定完整目标文件路径；同名文件仍可覆盖，目录仍可合并。覆盖符号链接先创建临时链接，成功后才替换目标；创建失败保留原文件。远端旧版 Python 若不支持安全覆盖，会报错而不会先删除原文件。
+传输按列表顺序执行并复用 SSH 连接；首个错误或取消立即停止，统一返回已完成、失败与未执行的文件，错误只记录一次，已完成文件不回滚、不自动重放。重复目标在开始传输前拒绝。模型可见的错误预览与整批正文都有大小预算，完整错误保留在工具结果中。先把文件内容写到临时文件，校验完整性后才发布到目标；`overwrite=false` 不覆盖并发创建的文件，`overwrite=true` 也不能用文件替换目录。失败或取消的下载不会截断原文件；上传若在远端发布后失去连接，结果可能未知，需要检查目标后再决定重试。远端旧版 Python 若不支持安全覆盖，会报错而不会先删除原文件。
 
 ## 五、只在一边有的
 
-- **本地独有**：项目工作区写入边界、凭据禁读清单（上传本地源也检查）、危险搜索根、Ally 数据目录保护、文档转换提示。
+- **本地独有**：项目工作区写入边界、凭据禁读清单（上传本地源也检查）、危险目录浏览根、Ally 数据目录保护、文档转换提示。
 - **远端独有**：已登记节点按请求所属本地工作区授权；未登记原始端点保持直接连接。没有远端项目目录访问边界。
-- **两边都有**：显式覆盖开关、版本冲突校验、删除保护与管理上下文例外。
+- **两边都有**：显式覆盖开关、提交期间的并发修改保护、删除保护与管理上下文例外。
 
 ## 六、已知缺口（按风险排序）
 
 1. **远端不是目录沙箱**。远端目录边界已按产品约定移除，实际访问能力由 SSH 账号权限决定；独立保护仅检查其覆盖的行为。
-2. **远端没有凭据禁读清单**。远端 `read` / 命令读凭据都不拦（本地三个入口都拦）。
+2. **远端没有凭据禁读清单**。远端 `read` / 命令读凭据都不拦（本地 read 与命令入口都拦）。
 3. **工作区节点授权不是主机级访问白名单**：只有匹配已登记别名或完整端点的连接才查授权；未登记端点不审批。将 `deploy@host` 改为未登记的 `root@host`，即可按另一身份直连（能否登录由 SSH 凭据和服务器决定）。因此不能依赖节点授权阻止模型访问任意主机或切换用户名。远端相关交互审批仅保留集群登记与工作区授权两处。
 4. **浅工作区下本地也删不掉一级子目录**：工作区是 `D:\proj` 时，删 `D:\proj\src` 会被「第 2 级目录」拒（深度规则按绝对路径算，不看它相对工作区是几级）。
 5. **凭据清单只管读**：工作区恰好是家目录时，`delete` 工具能删掉 `~/.ssh/id_rsa`（删除侧只有 Ally 数据目录、系统深度/名单两道）。

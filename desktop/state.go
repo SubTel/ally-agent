@@ -263,6 +263,8 @@ type chatUI struct {
 	ModelSearch          string
 	ContextOpen          bool
 	PromptPartsOpen      bool // the prompt's sections are detail: folded until the parent row is clicked
+	ToolSchemaPartsOpen  bool
+	ToolUsageOpen        bool
 	ExtraRootsOpen       bool
 	Retry                *retryInfo
 	Git                  backend.GitStatus
@@ -283,16 +285,11 @@ type chatUI struct {
 	// FollowBottom is the end a wheel asked to come back to. An answer that
 	// grows on the way moves the end further down; waiting for the new one
 	// would never arrive.
-	FollowBottom      float32
-	LastScrollY       float32
-	ChatLayoutSeen    bool
-	ChatWithExplorer  bool
-	ChatWithRail      bool
-	ChatTopNavigation bool
-	ChatWithFile      bool
-	HistoryIndex      int
-	HistoryDraft      string
-	WorkspaceHistory  []string
+	FollowBottom     float32
+	LastScrollY      float32
+	HistoryIndex     int
+	HistoryDraft     string
+	WorkspaceHistory []string
 	// List is the transcript's list: it builds only the rows in view and owns
 	// where they are scrolled.
 	List ui.ListState
@@ -495,9 +492,13 @@ func normalizeSettingsConfig(cfg backend.ConfigState) backend.ConfigState {
 
 // modelForm is the chat-model editor dialog state.
 type modelForm struct {
-	KeyEpoch       int
-	AdvancedOpen   bool
-	Open           bool
+	KeyEpoch     int
+	AdvancedOpen bool
+	Open         bool
+	// CloneMode marks a copy of an existing entry: the dialog says so and the
+	// save creates a new model instead of overwriting the source.
+	CloneMode      bool
+	CloneSource    string
 	Index          int
 	MaxTokensInput string
 	ContextInput   string

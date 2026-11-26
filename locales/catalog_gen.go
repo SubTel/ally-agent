@@ -36,6 +36,56 @@ type Messages struct{ locale string }
 // source language.
 func In(locale string) Messages { return Messages{locale} }
 
+// Ui1c87b4613673 says "Plan snapshot"
+// in the language the app shows.
+func Ui1c87b4613673() string { return In(i18n.Locale()).Ui1c87b4613673() }
+
+// Ui1c87b4613673 says "Plan snapshot"
+// in the language of msgs.
+func (msgs Messages) Ui1c87b4613673() string {
+	return Catalog.Format(msgs.locale, "ui_1c87b4613673", nil)
+}
+
+// UiDc9591e56d50 says "In progress"
+// in the language the app shows.
+func UiDc9591e56d50() string { return In(i18n.Locale()).UiDc9591e56d50() }
+
+// UiDc9591e56d50 says "In progress"
+// in the language of msgs.
+func (msgs Messages) UiDc9591e56d50() string {
+	return Catalog.Format(msgs.locale, "ui_dc9591e56d50", nil)
+}
+
+// Ui5b715411b1f9 says "Pending"
+// in the language the app shows.
+func Ui5b715411b1f9() string { return In(i18n.Locale()).Ui5b715411b1f9() }
+
+// Ui5b715411b1f9 says "Pending"
+// in the language of msgs.
+func (msgs Messages) Ui5b715411b1f9() string {
+	return Catalog.Format(msgs.locale, "ui_5b715411b1f9", nil)
+}
+
+// Ui707ff823ca87 says "%d earlier steps omitted"
+// in the language the app shows.
+func Ui707ff823ca87() string { return In(i18n.Locale()).Ui707ff823ca87() }
+
+// Ui707ff823ca87 says "%d earlier steps omitted"
+// in the language of msgs.
+func (msgs Messages) Ui707ff823ca87() string {
+	return Catalog.Format(msgs.locale, "ui_707ff823ca87", nil)
+}
+
+// Ui01fb3a24e08c says "%d later steps omitted"
+// in the language the app shows.
+func Ui01fb3a24e08c() string { return In(i18n.Locale()).Ui01fb3a24e08c() }
+
+// Ui01fb3a24e08c says "%d later steps omitted"
+// in the language of msgs.
+func (msgs Messages) Ui01fb3a24e08c() string {
+	return Catalog.Format(msgs.locale, "ui_01fb3a24e08c", nil)
+}
+
 // UiNavPosition says "Navigation"
 // in the language the app shows.
 func UiNavPosition() string { return In(i18n.Locale()).UiNavPosition() }
@@ -2264,6 +2314,16 @@ func Ui9cac78290c7c() string { return In(i18n.Locale()).Ui9cac78290c7c() }
 // in the language of msgs.
 func (msgs Messages) Ui9cac78290c7c() string {
 	return Catalog.Format(msgs.locale, "ui_9cac78290c7c", nil)
+}
+
+// UiA5215e953bb3 says "Copied from \"%[1]s\"; enter the API Key again, and the Model ID must differ from the source."
+// in the language the app shows.
+func UiA5215e953bb3() string { return In(i18n.Locale()).UiA5215e953bb3() }
+
+// UiA5215e953bb3 says "Copied from \"%[1]s\"; enter the API Key again, and the Model ID must differ from the source."
+// in the language of msgs.
+func (msgs Messages) UiA5215e953bb3() string {
+	return Catalog.Format(msgs.locale, "ui_a5215e953bb3", nil)
 }
 
 // Ui19a8a28fc696 says "Install from the plug-in source code directory anywhere on the machine"
@@ -5264,6 +5324,16 @@ func Ui8a3b0be2f535() string { return In(i18n.Locale()).Ui8a3b0be2f535() }
 // in the language of msgs.
 func (msgs Messages) Ui8a3b0be2f535() string {
 	return Catalog.Format(msgs.locale, "ui_8a3b0be2f535", nil)
+}
+
+// Ui4429a06d3cb4 says "Copy model"
+// in the language the app shows.
+func Ui4429a06d3cb4() string { return In(i18n.Locale()).Ui4429a06d3cb4() }
+
+// Ui4429a06d3cb4 says "Copy model"
+// in the language of msgs.
+func (msgs Messages) Ui4429a06d3cb4() string {
+	return Catalog.Format(msgs.locale, "ui_4429a06d3cb4", nil)
 }
 
 // Ui0b28fc7ccbd4 says "Copy files"
@@ -16444,4 +16514,54 @@ func UiContextBudgetError() string { return In(i18n.Locale()).UiContextBudgetErr
 // in the language of msgs.
 func (msgs Messages) UiContextBudgetError() string {
 	return Catalog.Format(msgs.locale, "ui_context_budget_error", nil)
+}
+
+// UiContextToolCalls says "Calls"
+// in the language the app shows.
+func UiContextToolCalls() string { return In(i18n.Locale()).UiContextToolCalls() }
+
+// UiContextToolCalls says "Calls"
+// in the language of msgs.
+func (msgs Messages) UiContextToolCalls() string {
+	return Catalog.Format(msgs.locale, "ui_context_tool_calls", nil)
+}
+
+// UiContextToolCallTokens says "Call"
+// in the language the app shows.
+func UiContextToolCallTokens() string { return In(i18n.Locale()).UiContextToolCallTokens() }
+
+// UiContextToolCallTokens says "Call"
+// in the language of msgs.
+func (msgs Messages) UiContextToolCallTokens() string {
+	return Catalog.Format(msgs.locale, "ui_context_tool_call_tokens", nil)
+}
+
+// UiContextToolResultTokens says "Result"
+// in the language the app shows.
+func UiContextToolResultTokens() string { return In(i18n.Locale()).UiContextToolResultTokens() }
+
+// UiContextToolResultTokens says "Result"
+// in the language of msgs.
+func (msgs Messages) UiContextToolResultTokens() string {
+	return Catalog.Format(msgs.locale, "ui_context_tool_result_tokens", nil)
+}
+
+// UiContextUnknownTool says "Unknown tool"
+// in the language the app shows.
+func UiContextUnknownTool() string { return In(i18n.Locale()).UiContextUnknownTool() }
+
+// UiContextUnknownTool says "Unknown tool"
+// in the language of msgs.
+func (msgs Messages) UiContextUnknownTool() string {
+	return Catalog.Format(msgs.locale, "ui_context_unknown_tool", nil)
+}
+
+// UiContextToolUsageNote says "Current context estimates; calls include arguments and count toward AI replies"
+// in the language the app shows.
+func UiContextToolUsageNote() string { return In(i18n.Locale()).UiContextToolUsageNote() }
+
+// UiContextToolUsageNote says "Current context estimates; calls include arguments and count toward AI replies"
+// in the language of msgs.
+func (msgs Messages) UiContextToolUsageNote() string {
+	return Catalog.Format(msgs.locale, "ui_context_tool_usage_note", nil)
 }

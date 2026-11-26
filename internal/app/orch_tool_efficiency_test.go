@@ -39,7 +39,7 @@ func TestReadPreviewBudgetKeepsBatchBoundedAndContinuationEditable(t *testing.T)
 		t.Fatalf("expected all 20 files, got %d", len(result.Files))
 	}
 	for _, f := range result.Files {
-		if f.Error != "" || !f.Truncated || len(f.Content) > maxReadPreviewBytes+256 || !f.Editable || f.Version == "" {
+		if f.Error != "" || !f.Truncated || len(f.Content) > maxReadPreviewBytes+256 || !f.Editable {
 			t.Fatalf("expected a bounded editable preview for %s: error=%q truncated=%v bytes=%d", f.Path, f.Error, f.Truncated, len(f.Content))
 		}
 		if f.NextStartLine != f.EndLine+1 || f.NextStartLine <= 1 {
@@ -57,15 +57,15 @@ func TestReadPreviewBudgetKeepsBatchBoundedAndContinuationEditable(t *testing.T)
 	}
 	boundBatchReadPreview(&remoteBatch)
 	remote := remoteBatch.Files[0]
-	if err != nil || remote.Content != first.Content || remote.Version != first.Version {
+	if err != nil || remote.Content != first.Content {
 		t.Fatalf("local/remote previews must agree: err=%v local=%d remote=%d", err, len(first.Content), len(remote.Content))
 	}
 	next, err := a.batchReadFilesWithConfig(a.config, BatchReadRequest{Files: []BatchReadFileRequest{{Path: req.Files[0].Path, StartLine: first.NextStartLine}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(next.Files) != 1 || next.Files[0].StartLine != first.EndLine+1 || next.Files[0].Version != first.Version || next.Files[0].Error != "" {
-		t.Fatalf("continuation must retain the version and next unread line: %#v", next)
+	if len(next.Files) != 1 || next.Files[0].StartLine != first.EndLine+1 || next.Files[0].Error != "" {
+		t.Fatalf("continuation must retain the next unread line: %#v", next)
 	}
 	model := renderReadResultForModel(*result)
 	if len(model) > maxReadBatchPreviewBytes+4096 || !strings.Contains(model, fmt.Sprintf("Use startLine=%d to continue", first.NextStartLine)) {
@@ -189,8 +189,11 @@ func TestCommandFullLogCanBeReadAndSearched(t *testing.T) {
 	if err != nil || !strings.Contains(read.Content, "FINAL_ERROR: build failed") {
 		t.Fatalf("read must retrieve the full log tail: err=%v content=%q", err, read.Content)
 	}
-	hits, err := a.grepFilesWithConfig(context.Background(), a.config, GrepRequest{Path: r.OutputFilePath, Pattern: "FINAL_ERROR"})
-	if err != nil || hits.MatchedLines != 1 {
-		t.Fatalf("grep must search the retained log directly: err=%v hits=%#v", err, hits)
+	logPath := "'" + strings.ReplaceAll(filepath.ToSlash(r.OutputFilePath), "'", "'\"'\"'") + "'"
+	search, err := a.runCommandWithConfig(context.Background(), a.config, CommandRequest{
+		Command: "rg -p --color never -F -e FINAL_ERROR -- " + logPath,
+	})
+	if err != nil || search.ExitCode != 0 || !strings.Contains(search.Output, "FINAL_ERROR: build failed") {
+		t.Fatalf("rg must search the retained log directly: err=%v output=%#v", err, search)
 	}
 }

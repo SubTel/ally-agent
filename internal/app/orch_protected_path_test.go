@@ -110,8 +110,8 @@ func TestEditRefusesSymlinkedDirectoryEscape(t *testing.T) {
 	cfg := ConfigState{Workspace: ws}
 
 	res := app.executeTool(t.Context(), cfg, "s-1", "edit", encodedToolArgs(t, FileTextEdits{
-		Path:    "link/authorized_keys",
-		Version: hashVersion([]byte("original\n")),
+		Path: "link/authorized_keys",
+
 		Changes: []TextChange{{OldText: "original", NewText: "owned"}},
 	}))
 	if res.OK {
@@ -162,8 +162,8 @@ func TestReadOversizedImageDoesNotBufferTheFile(t *testing.T) {
 	if !strings.Contains(result.Content, "too large") {
 		t.Fatalf("notice = %q, want the too-large note", result.Content)
 	}
-	if result.Size != size || result.SHA256 == "" || result.Version == "" {
-		t.Fatalf("result = %+v, want the real size plus a streamed hash and version", result)
+	if result.Size != size || result.SHA256 == "" {
+		t.Fatalf("result = %+v, want the real size plus a streamed hash", result)
 	}
 }
 
@@ -364,7 +364,7 @@ func TestCommandFenceRefusesEverySpellingOfACredentialRead(t *testing.T) {
 	for _, commandLine := range []string{
 		"cat ~/.ssh/id_rsa",
 		"cat < ~/.ssh/id_rsa",
-		"grep -f ~/.ssh/id_rsa README.md",
+		"rg -f ~/.ssh/id_rsa README.md",
 	} {
 		err := checkCommandSafetyAtCwd(CommandRequest{Command: commandLine, Cwd: workspace}, roots, workspace)
 		if code := toolErrorCode(err); code != "E_PROTECTED_PATH" {
@@ -406,7 +406,7 @@ func TestCommandFenceRefusesTheDataDirectorySecrets(t *testing.T) {
 	for _, commandLine := range []string{
 		"cat ~/.ally_agent/config.json",
 		"cat ~/.ally_agent/mcp.json",
-		"grep -n . ~/.ally_agent/ssh_clusters.json",
+		"rg -n . ~/.ally_agent/ssh_clusters.json",
 	} {
 		err := checkCommandSafetyAtCwd(CommandRequest{Command: commandLine, Cwd: workspace}, roots, workspace)
 		if code := toolErrorCode(err); code != "E_PROTECTED_PATH" {
@@ -447,7 +447,7 @@ func TestLocalToolsRepositoryMetadataLifecycle(t *testing.T) {
 			}
 			file := name + "/config"
 			check("create", CreateFileRequest{Path: file, Content: "original\n"})
-			check("edit", FileTextEdits{Path: file, Version: hashVersion([]byte("original\n")), Changes: []TextChange{{OldText: "original", NewText: "edited"}}})
+			check("edit", FileTextEdits{Path: file, Changes: []TextChange{{OldText: "original", NewText: "edited"}}})
 			if data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(file))); err != nil || string(data) != "edited\n" {
 				t.Fatalf("edit=%q, %v", data, err)
 			}
@@ -483,7 +483,7 @@ func TestWorkspaceFileSymlinkEditsItsTarget(t *testing.T) {
 	}
 	a := newIsolatedTestApp(t)
 	cfg := ConfigState{Workspace: root}
-	result := a.executeTool(t.Context(), cfg, "links", "edit", encodedToolArgs(t, FileTextEdits{Path: "alias.txt", Version: hashVersion([]byte("old\n")), Changes: []TextChange{{OldText: "old", NewText: "edited"}}}))
+	result := a.executeTool(t.Context(), cfg, "links", "edit", encodedToolArgs(t, FileTextEdits{Path: "alias.txt", Changes: []TextChange{{OldText: "old", NewText: "edited"}}}))
 	if !result.OK {
 		t.Fatal(result.Error)
 	}

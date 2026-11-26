@@ -3,8 +3,8 @@ package desktop
 
 import (
 	"ally-dev/desktop/uikit"
-	"ally-dev/locales"
 	backend "ally-dev/internal/app"
+	"ally-dev/locales"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -55,7 +55,7 @@ var toolTable = map[string]toolDescriptor{
 	"ssh_cluster":        {"Cluster List", true, false},
 	"service":            {"Service", true, false},
 	"scheduled_task":     {"Scheduled Task", true, true},
-	"remote_transfer":    {"Transfer", true, true},
+	"remote_transfer":    {"Transfer", false, true},
 	"screenshot":         {"Screenshot", true, false},
 	"render_html":        {"Render", true, true},
 	"suggest":            {"Suggestions", true, false},
@@ -928,6 +928,7 @@ func (a *desktop) toolCard(c *ui.Context, t *conversation, index int, m map[stri
 		})
 	}
 	isMCP := name != mcpSearchToolKind && (target != "" || isMCPDisplayTool(m))
+	isSSH := isSSHTool(name) && !isMCP
 	if isMCP {
 		operation = target
 		if operation == "" {
@@ -1010,7 +1011,7 @@ func (a *desktop) toolCard(c *ui.Context, t *conversation, index int, m map[stri
 			if name != "subagent" {
 				ui.Box(c).Absolute().Left(-16).Top(0).Width(16).HeightPercent(100).Center().Children(func() { toolStatusIcon(c, state) })
 			}
-			if isSSHTool(name) && !isMCP {
+			if isSSH {
 				ui.Text(c.Key(key+"-ssh"), "SSH").FontSize(fsTool).TextColor(p.accent).Shrink(0).LineHeight(1.4).NoWrap()
 			}
 			if isMCP {
@@ -1041,10 +1042,7 @@ func (a *desktop) toolCard(c *ui.Context, t *conversation, index int, m map[stri
 					text := summary
 					var parts []string
 					if name == "remote_transfer" {
-						local, remote := str(args, "localPath"), str(args, "remotePath")
-						if str(args, "action") == "download" {
-							local, remote = remote, local
-						}
+						local, remote := singleTransferPaths(args)
 						if local != "" && remote != "" {
 							parts = []string{local, remote}
 						}
@@ -1075,7 +1073,7 @@ func (a *desktop) toolCard(c *ui.Context, t *conversation, index int, m map[stri
 					}
 				}
 			}
-			if isSSHTool(name) && name != "ssh_cluster" && !isMCP {
+			if isSSH && name != "ssh_cluster" {
 				if alias := toolSSHAlias(args); alias != "" {
 					label := ui.Text(c.Key(key+"-ssh-alias"), alias).FontSize(fsTool - 2).TextColor(a.secondaryInk()).LineHeight(1.4).SingleLine().MinWidth(0).MaxWidthPercent(24).Shrink(0)
 					uikit.Tooltip(c, label, alias)
@@ -1090,8 +1088,8 @@ func (a *desktop) toolCard(c *ui.Context, t *conversation, index int, m map[stri
 				}
 			}
 			if name == "command" || name == "remote_run_command" {
-				// Exit status and duration describe the command, so they sit right
-				// after it instead of being pushed to the row's far edge.
+				// Exit status describes the command, so it sits right
+				// after it (and the SSH alias), before the purpose at the far edge.
 				if code, exists := result["exitCode"]; exists {
 					ui.Text(c, fmt.Sprintf("exit %v", code)).FontSize(fsTool - 2).TextColor(a.secondaryInk()).Shrink(0).NoWrap()
 				}
@@ -1101,7 +1099,18 @@ func (a *desktop) toolCard(c *ui.Context, t *conversation, index int, m map[stri
 				if boolOf(result, "promotedToService") {
 					neutralChip(c, locales.Text("已转后台服务"))
 				}
-				if ms := toolDuration(m, result); ms > 0 || state == "success" || state == "error" || state == "cancelled" {
+			}
+			// SSH timings follow the server alias; local command timing follows
+			// its exit status. Completed calls keep the reported duration.
+			if name == "command" || isSSH {
+				ms := toolDuration(m, result)
+				if isSSH && state == "running" {
+					if started, ok := m["startedAt"].(time.Time); ok {
+						ms = max(int64(1), c.Now().Sub(started).Milliseconds())
+						c.After(time.Second)
+					}
+				}
+				if ms > 0 || state == "success" || state == "error" || state == "cancelled" {
 					ui.Text(c, fmtDur(ms)).FontSize(fsTool - 2).TextColor(a.secondaryInk()).Shrink(0).NoWrap()
 				}
 			}
@@ -1149,8 +1158,8 @@ func (a *desktop) toolCard(c *ui.Context, t *conversation, index int, m map[stri
 					neutralChip(c, locales.Text(fastCompactChip))
 				}
 			}
-			// A command's duration already sits next to its exit status.
-			if desc.showTiming && name != "command" && name != "remote_run_command" {
+			// Command and SSH durations are already beside their metadata.
+			if desc.showTiming && name != "command" && !isSSH {
 				if ms := toolDuration(m, result); ms > 0 || state == "success" || state == "error" || state == "cancelled" {
 					ui.Text(c, fmtDur(ms)).FontSize(fsTool - 2).TextColor(a.secondaryInk()).Shrink(0).NoWrap()
 				}
@@ -1287,7 +1296,7 @@ func (a *desktop) toolCard(c *ui.Context, t *conversation, index int, m map[stri
 			case name == "service" || name == "scheduled_task" || name == "ssh_cluster":
 				a.toolResourceCards(c, key, name, result, open)
 			case name == "remote_transfer":
-				toolFields(c, result, []string{"action", "alias", "target", "localPath", "remotePath", "fileCount", "dirCount", "totalBytes"}, a.secondaryInk())
+				a.toolTransferBody(c, result)
 			case name == "fetch" || name == "http_request" || name == "web_fetch":
 				// Network tool summaries stay on the header line.
 			case name == "render_html":
@@ -1564,12 +1573,12 @@ func toolArgSummary(name string, args map[string]any) string {
 	case "subagent":
 		return pick("description", "task", "prompt")
 	case "remote_transfer":
-		local, remote := str(args, "localPath"), str(args, "remotePath")
-		if str(args, "action") == "download" {
-			local, remote = remote, local
-		}
+		local, remote := singleTransferPaths(args)
 		if local != "" && remote != "" {
 			return local + " → " + remote
+		}
+		if count := len(list(args, "files")); count > 1 {
+			return fmt.Sprintf("%d files", count)
 		}
 		return local + remote
 	case "service":
@@ -1853,12 +1862,6 @@ func (a *desktop) toolBody(c *ui.Context, t *conversation, index int, name strin
 				}
 			})
 		}
-	case "remote_transfer":
-		for _, pair := range [][2]string{{locales.Text("方向"), str(result, "direction")}, {locales.Text("来源"), str(result, "source")}, {locales.Text("目标"), str(result, "target")}, {locales.Text("文件数"), fmt.Sprint(int(num(result, "files")))}, {locales.Text("目录数"), fmt.Sprint(int(num(result, "dirs")))}} {
-			if pair[1] != "" && pair[1] != "0" {
-				kv(c, pair[0], pair[1], a.secondaryInk())
-			}
-		}
 	case "ask":
 		if qs := list(result, "questions"); len(qs) > 0 {
 			for _, q := range qs {
@@ -1874,6 +1877,84 @@ func (a *desktop) toolBody(c *ui.Context, t *conversation, index int, name strin
 			return
 		}
 		codeBlock(c, t.roundKey("tool-body", index), text, 150, a.secondaryInk())
+	}
+}
+
+func transferFilePaths(file map[string]any, action string) (string, string) {
+	local, remote := str(file, "localPath"), str(file, "remotePath")
+	if action == "download" {
+		return remote, local
+	}
+	return local, remote
+}
+
+func singleTransferPaths(args map[string]any) (string, string) {
+	files := list(args, "files")
+	if len(files) != 1 {
+		return "", ""
+	}
+	file, _ := files[0].(map[string]any)
+	return transferFilePaths(file, str(args, "action"))
+}
+
+// toolTransferBody draws one row per mapping in a single muted ink. The card
+// header already names the action, the server and the file count, so repeating
+// them as fields only pushed each file's own outcome out of sight.
+func (a *desktop) toolTransferBody(c *ui.Context, result map[string]any) {
+	files := make([]map[string]any, 0, len(list(result, "files")))
+	for _, value := range list(result, "files") {
+		if file, ok := value.(map[string]any); ok {
+			files = append(files, file)
+		}
+	}
+	if len(files) == 0 {
+		if message := str(result, "error"); message != "" {
+			uikit.ErrorText(c, message)
+			return
+		}
+		fieldNote(c, resultText(result), a.secondaryInk())
+		return
+	}
+	ink := a.secondaryInk().Mix(c.Theme().Text, 0.3)
+	action := str(result, "action")
+	for i, file := range files {
+		from, to := transferFilePaths(file, action)
+		path := from + " → " + to
+		prefix := "├─ "
+		if i == len(files)-1 {
+			prefix = "└─ "
+		}
+		status, color := transferFileStatus(c, file, ink)
+		ui.Column(c.Key(fmt.Sprintf("transfer-file-%d", i))).Gap(1).Children(func() {
+			ui.Row(c).Gap(gapTight).AlignItems(ui.Center).Children(func() {
+				ui.Text(c, prefix).Font(monoFamily).FontSize(fsSmall).TextColor(ink).Shrink(0)
+				label := ui.Text(c, path).Font(monoFamily).FontSize(fsSmall).TextColor(ink).SingleLine().MinWidth(0).Shrink(1)
+				uikit.Tooltip(c, label, path)
+				ui.Text(c, "("+status+")").FontSize(fsTiny).TextColor(color).Shrink(0)
+			})
+			if message := str(file, "error"); message != "" {
+				uikit.ErrorText(c, message)
+			}
+		})
+	}
+}
+
+// transferFileStatus keeps every outcome on the row it belongs to: a mapping
+// that ran reports its bytes, one that never ran says so instead of reading
+// like a failure, and only a real failure takes the danger color. The words are
+// the result fields the tool itself writes, so a card never disagrees with the
+// payload behind it.
+func transferFileStatus(c *ui.Context, file map[string]any, ink ui.Color) (string, ui.Color) {
+	switch {
+	case boolOf(file, "ok"):
+		if size := int64(num(file, "totalBytes")); size > 0 {
+			return "ok · " + fmtBytes(size), ink
+		}
+		return "ok", ink
+	case boolOf(file, "skipped"):
+		return "skipped", ink
+	default:
+		return "failed", c.Theme().Danger
 	}
 }
 

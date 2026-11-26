@@ -1,4 +1,9 @@
 {
+  "ui_1c87b4613673": "计划快照",
+  "ui_dc9591e56d50": "进行中",
+  "ui_5b715411b1f9": "待开始",
+  "ui_707ff823ca87": "前面 %d 个步骤已省略",
+  "ui_01fb3a24e08c": "后面 %d 个步骤已省略",
   "ui_nav_position": "导航栅",
   "ui_nav_note": "侧边栅常驻左侧；顶部菜单隐藏左侧栅，用 Logo 旁的按钮打开菜单。",
   "ui_nav_sidebar": "侧边栅",
@@ -223,6 +228,7 @@
   "ui_bdd4e62059e6": "今天是 %d月%d日 %s，现在是 %02d:%02d。%s，我们把注意力放回眼前，先解决最重要的一件事。",
   "ui_5c9cf5e0dd47": "今日",
   "ui_9cac78290c7c": "从「",
+  "ui_a5215e953bb3": "从「%s」复制；API Key 需重新填写，Model ID 不能与原条目相同。",
   "ui_19a8a28fc696": "从本机任意位置的插件源码目录安装",
   "ui_73686cb94d4d": "从目录安装",
   "ui_b9af2de88d90": "代理地址",
@@ -523,6 +529,7 @@
   "ui_f33083f276e4": "复制工作区路径失败：",
   "ui_e543a676d077": "复制总结",
   "ui_8a3b0be2f535": "复制提问",
+  "ui_4429a06d3cb4": "复制模型",
   "ui_0b28fc7ccbd4": "复制文件",
   "ui_7dde3fc31529": "复制文件失败：",
   "ui_02bcdbc5a145": "复制相对路径",
@@ -1830,5 +1837,10 @@
   "ui_context_mcp_catalog": "MCP 工具清单",
   "ui_context_mcp_catalog_note": "加载 MCP 工具目录，完整定义仍按需查询；不改变连接与工具执行权限。",
   "ui_context_budget_note": "自动加载合计上限 %d KiB；超限会提示，不静默丢弃项目规则或清单项。",
-  "ui_context_budget_error": "自动加载上下文超过 %d KiB，未发送模型请求。请精简项目指令、自定义提示词或清单，或在设置中关闭不需要的加载项后新建会话；不会静默丢弃规则或清单项。"
+  "ui_context_budget_error": "自动加载上下文超过 %d KiB，未发送模型请求。请精简项目指令、自定义提示词或清单，或在设置中关闭不需要的加载项后新建会话；不会静默丢弃规则或清单项。",
+  "ui_context_tool_calls": "次数",
+  "ui_context_tool_call_tokens": "调用",
+  "ui_context_tool_result_tokens": "结果",
+  "ui_context_unknown_tool": "未知工具",
+  "ui_context_tool_usage_note": "当前上下文估算；调用含参数，计入 AI 回复"
 }

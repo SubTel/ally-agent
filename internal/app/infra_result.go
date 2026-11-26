@@ -69,6 +69,11 @@ func toolResultSummary(name string, result *toolResult) string {
 		if decodeToolData(result.Data, &r) {
 			return fmt.Sprintf("%d files · +%d -%d", r.FileCount, r.AddedLines, r.RemovedLines)
 		}
+	case "remote_transfer":
+		var r RemoteTransferResult
+		if decodeToolData(result.Data, &r) {
+			return r.Summary
+		}
 	case "replace_exact", "replace_lines":
 		data, _ := json.Marshal(result.Data)
 		var r EditResult
@@ -263,7 +268,33 @@ func compactToolDataForModel(name string, result toolResult, fullJSON string) st
 	case "remote_transfer":
 		var r RemoteTransferResult
 		if decodeToolData(result.Data, &r) {
-			return modelResultBody(fmt.Sprintf("// remote_transfer | action=%q | alias=%q | local=%q | remote=%q | bytes=%d | files=%d | dirs=%d", r.Action, r.Alias, r.LocalPath, r.RemotePath, r.TotalBytes, r.FileCount, r.DirCount), r.Summary)
+			var body strings.Builder
+			truncated := false
+			for _, file := range r.Files {
+				status := "failed"
+				if file.OK {
+					status = "completed"
+				} else if file.Skipped {
+					status = "not_transferred"
+				}
+				fmt.Fprintf(&body, "local=%q remote=%q status=%s bytes=%d", file.LocalPath, file.RemotePath, status, file.TotalBytes)
+				if file.Error != "" {
+					message, reduced := compactTextForModel(file.Error, compactTextSpec{limit: 1024})
+					truncated = truncated || reduced
+					fmt.Fprintf(&body, " error=%q", message)
+				}
+				if file.ErrorCode != "" {
+					fmt.Fprintf(&body, " errorCode=%q", file.ErrorCode)
+				}
+				body.WriteByte('\n')
+			}
+			header := fmt.Sprintf("// remote_transfer | action=%q | alias=%q | bytes=%d | files=%d | failed=%d | skipped=%d", r.Action, r.Alias, r.TotalBytes, r.FileCount, r.FailedCount, r.SkippedCount)
+			if truncated || len(header)+2+body.Len() > maxModelToolOutput {
+				header += " | truncated"
+			}
+			// Clamp the whole rendered result: aliases, paths and quoting can expand it.
+			text, _ := compactTextForModel(modelResultBody(header, body.String()), compactTextSpec{limit: maxModelToolOutput, head: modelToolHeadBytes, tail: modelToolTailBytes})
+			return text
 		}
 		return modelFallbackResult(name, result.Data, fullJSON)
 	case "read", "remote_read":
@@ -904,10 +935,7 @@ func renderReadResultForModel(r BatchReadResult) string {
 			blocks = append(blocks, header+" | error="+strconv.Quote(code)+"\n\n"+f.Error)
 			continue
 		}
-		if f.Version != "" {
-			header += " | version=" + strconv.Quote(f.Version)
-		}
-		if !f.Editable && f.Version == "" {
+		if !f.Editable {
 			header += " | editable=false"
 		}
 		if f.StartLine > 0 && f.EndLine > 0 {
@@ -921,11 +949,6 @@ func renderReadResultForModel(r BatchReadResult) string {
 		}
 		if len(f.TruncatedLines) > 0 {
 			header += " | truncated-lines=" + strconv.Quote(formatTruncatedLines(f.TruncatedLines, f.TruncatedLinesOmitted))
-		}
-		if f.Reused {
-			header += " | reused"
-			blocks = append(blocks, header)
-			continue
 		}
 		if f.DataURL != "" {
 			header += " | image=sent-as-image-input-in-following-message"
@@ -1014,7 +1037,7 @@ func renderCommandResultForModel(r CommandResult) string {
 
 func commandModelReducedNote(outputFilePath string) string {
 	if outputFilePath != "" {
-		return "[中间段已从模型上下文省略；完整输出在 " + outputFilePath + "（见首行 full 字段）。本地用 read/grep，远端用同一 alias 的 remote_read 或只读命令检索；日志过大时用 tailLines，不要整读]"
+		return "[中间段已从模型上下文省略；完整输出在 " + outputFilePath + "（见首行 full 字段）。本地用 read 或 command 执行 rg 检索，远端用同一 alias 的 remote_read 或只读命令检索；日志过大时用 tailLines，不要整读]"
 	}
 	return "[中间段已从模型上下文省略，未提供完整日志文件；不要仅为查看输出重复执行有副作用的命令]"
 }
@@ -1062,7 +1085,7 @@ func renderMultiEditResultForModel(r MultiEditResult) string {
 	alias := remoteAliasSegment(r.RemoteAlias)
 	var blocks []string
 	for _, f := range r.Files {
-		blocks = append(blocks, "// edit"+alias+" | path="+strconv.Quote(f.Path)+" | new version="+strconv.Quote(f.Version))
+		blocks = append(blocks, "// edit"+alias+" | path="+strconv.Quote(f.Path))
 	}
 	body := r.Summary
 	if r.Validation != "" {
@@ -1081,7 +1104,7 @@ func renderMultiEditResultForModel(r MultiEditResult) string {
 }
 
 func renderEditResultForModel(name string, r EditResult) string {
-	header := "// " + name + remoteAliasSegment(r.RemoteAlias) + " | path=" + strconv.Quote(r.Path) + " | version=" + strconv.Quote(r.Version)
+	header := "// " + name + remoteAliasSegment(r.RemoteAlias) + " | path=" + strconv.Quote(r.Path)
 	if r.Created != nil {
 		header += fmt.Sprintf(" | created=%t", *r.Created)
 	}
