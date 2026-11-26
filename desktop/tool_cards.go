@@ -953,6 +953,11 @@ func (a *desktop) toolCard(c *ui.Context, t *conversation, index int, m map[stri
 		}
 	}
 	result := toolResult(m)
+	if name == "delete" || name == "remote_delete_path" {
+		if counted := deleteBatchSummary(result); counted != "" {
+			summary = counted
+		}
+	}
 	if name == "ask" && !isMCP {
 		questions := list(args, "questions")
 		if len(questions) == 0 {
@@ -1040,37 +1045,15 @@ func (a *desktop) toolCard(c *ui.Context, t *conversation, index int, m map[stri
 					})
 				} else {
 					text := summary
-					var parts []string
-					if name == "remote_transfer" {
-						local, remote := singleTransferPaths(args)
-						if local != "" && remote != "" {
-							parts = []string{local, remote}
-						}
+					if name != "ask" && summaryTakesParens(name) {
+						text = "(" + text + ")"
 					}
-					if len(parts) == 2 {
-						ui.Row(c.Key(key + "-transfer-summary")).MinWidth(0).Shrink(1).AlignItems(ui.Center).Children(func() {
-							color := a.secondaryInk()
-							ui.Text(c, "(").FontSize(fsTool).TextColor(color).Shrink(0)
-							for i, part := range parts {
-								if i > 0 {
-									ui.Text(c, " → ").FontSize(fsTool).TextColor(color).Shrink(0)
-								}
-								label := ui.Text(c, part).FontSize(fsTool).TextColor(color).LineHeight(1.4).SingleLine().MinWidth(0).Shrink(1)
-								uikit.Tooltip(c, label, part)
-							}
-							ui.Text(c, ")").FontSize(fsTool).TextColor(color).Shrink(0)
-						})
-					} else {
-						if name != "ask" && ((name != "delete" && name != "remote_delete_path") || len(list(args, "paths")) == 0) {
-							text = "(" + text + ")"
-						}
-						color := a.secondaryInk()
-						if name == "edit" || name == "create" || name == "delete" || name == "remote_edit" || name == "remote_create_file" || name == "remote_delete_path" {
-							color = color.Mix(c.Theme().Text, 0.4)
-						}
-						label := ui.Text(c.Key(key+"-summary"), text).FontSize(fsTool).TextColor(color).LineHeight(1.4).SingleLine().MinWidth(0).Shrink(1)
-						uikit.Tooltip(c, label, summary)
+					color := a.secondaryInk()
+					if name == "edit" || name == "create" || name == "delete" || name == "remote_edit" || name == "remote_create_file" || name == "remote_delete_path" {
+						color = color.Mix(c.Theme().Text, 0.4)
 					}
+					label := ui.Text(c.Key(key+"-summary"), text).FontSize(fsTool).TextColor(color).LineHeight(1.4).SingleLine().MinWidth(0).Shrink(1)
+					uikit.Tooltip(c, label, summary)
 				}
 			}
 			if isSSH && name != "ssh_cluster" {
@@ -1494,6 +1477,51 @@ func parseToolArgs(raw string) map[string]any {
 	return out
 }
 
+// summaryTakesParens keeps one rule for cards whose summary counts things: the
+// count stands on its own, the paths and files it covers are listed inside.
+func summaryTakesParens(name string) bool {
+	switch name {
+	case "delete", "remote_delete_path", "remote_transfer":
+		return false
+	}
+	return true
+}
+
+// deleteBatchSummary counts what the batch actually removed. Files and
+// directories read differently, so the header says which of each was hit; a
+// batch that removed nothing keeps the request's path count instead.
+func deleteBatchSummary(result map[string]any) string {
+	files, dirs := 0, 0
+	for _, item := range list(result, "paths") {
+		row, ok := item.(map[string]any)
+		if !ok || !boolOf(row, "ok") || boolOf(row, "absent") {
+			continue
+		}
+		// The tool reports "directory" for folders; symlinks and plain files
+		// count as files.
+		if strings.HasPrefix(strings.ToLower(str(row, "kind")), "dir") {
+			dirs++
+		} else {
+			files++
+		}
+	}
+	var parts []string
+	if files > 0 {
+		parts = append(parts, countLabel(files, "file"))
+	}
+	if dirs > 0 {
+		parts = append(parts, countLabel(dirs, "dir"))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func countLabel(n int, unit string) string {
+	if n == 1 {
+		return "1 " + unit
+	}
+	return fmt.Sprintf("%d %ss", n, unit)
+}
+
 func toolArgSummary(name string, args map[string]any) string {
 	pick := func(keys ...string) string {
 		for _, k := range keys {
@@ -1513,7 +1541,7 @@ func toolArgSummary(name string, args map[string]any) string {
 	switch name {
 	case "command", "remote_run_command":
 		return pick("command", "cmd")
-	case "edit", "create", "read", "delete", "remote_read", "remote_edit", "remote_create_file", "remote_delete_path":
+	case "edit", "create", "read", "remote_read", "remote_edit", "remote_create_file":
 		if p := pick("path", "file_path", "file"); p != "" {
 			return p
 		}
@@ -1529,6 +1557,20 @@ func toolArgSummary(name string, args map[string]any) string {
 		}
 		if paths, ok := args["paths"].([]any); ok && len(paths) > 0 {
 			return fmt.Sprintf("%d paths", len(paths))
+		}
+	case "delete", "remote_delete_path":
+		// 外层只说删几个，具体路径在展开后的正文里，和 SSH 传输一个口径。
+		count := len(list(args, "paths"))
+		if count == 0 && pick("path", "file_path", "file") != "" {
+			count = 1
+		}
+		switch count {
+		case 0:
+			return ""
+		case 1:
+			return "1 path"
+		default:
+			return fmt.Sprintf("%d paths", count)
 		}
 	case "grep":
 		return pick("pattern")
@@ -1573,14 +1615,15 @@ func toolArgSummary(name string, args map[string]any) string {
 	case "subagent":
 		return pick("description", "task", "prompt")
 	case "remote_transfer":
-		local, remote := singleTransferPaths(args)
-		if local != "" && remote != "" {
-			return local + " → " + remote
-		}
-		if count := len(list(args, "files")); count > 1 {
+		// 外层只说传了几个文件；路径与结果都在展开后的正文里，不重复。
+		switch count := len(list(args, "files")); count {
+		case 0:
+			return ""
+		case 1:
+			return "1 file"
+		default:
 			return fmt.Sprintf("%d files", count)
 		}
-		return local + remote
 	case "service":
 		return pick("action", "name", "id")
 	case "scheduled_task":
@@ -1841,27 +1884,6 @@ func (a *desktop) toolBody(c *ui.Context, t *conversation, index int, name strin
 			})
 			flat(c, locales.Text("在浏览器打开")).OnClick(func() { a.openHTMLPreview(t.Workspace, html) })
 		})
-	case "delete", "remote_delete_path":
-		for _, item := range list(result, "results") {
-			row, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			path := str(row, "path")
-			okFlag := boolOf(row, "ok")
-			absent := boolOf(row, "absent")
-			ui.Row(c).Gap(gapField).Children(func() {
-				ui.Text(c, "├─").Font(monoFamily).FontSize(fsSmall).TextColor(a.secondaryInk())
-				ui.Text(c, path).Font(monoFamily).FontSize(fsSmall)
-				if absent {
-					neutralChip(c, locales.Text("本就不存在"))
-				} else if okFlag {
-					chip(c, locales.Text("已删除"), c.Theme().Success, ui.RGBA(78, 200, 126, 0.12))
-				} else {
-					uikit.ErrorText(c, str(row, "error")).Grow(1)
-				}
-			})
-		}
 	case "ask":
 		if qs := list(result, "questions"); len(qs) > 0 {
 			for _, q := range qs {
@@ -1886,15 +1908,6 @@ func transferFilePaths(file map[string]any, action string) (string, string) {
 		return remote, local
 	}
 	return local, remote
-}
-
-func singleTransferPaths(args map[string]any) (string, string) {
-	files := list(args, "files")
-	if len(files) != 1 {
-		return "", ""
-	}
-	file, _ := files[0].(map[string]any)
-	return transferFilePaths(file, str(args, "action"))
 }
 
 // toolTransferBody draws one row per mapping in a single muted ink. The card
@@ -1924,13 +1937,16 @@ func (a *desktop) toolTransferBody(c *ui.Context, result map[string]any) {
 		if i == len(files)-1 {
 			prefix = "└─ "
 		}
-		status, color := transferFileStatus(c, file, ink)
 		ui.Column(c.Key(fmt.Sprintf("transfer-file-%d", i))).Gap(1).Children(func() {
 			ui.Row(c).Gap(gapTight).AlignItems(ui.Center).Children(func() {
 				ui.Text(c, prefix).Font(monoFamily).FontSize(fsSmall).TextColor(ink).Shrink(0)
 				label := ui.Text(c, path).Font(monoFamily).FontSize(fsSmall).TextColor(ink).SingleLine().MinWidth(0).Shrink(1)
 				uikit.Tooltip(c, label, path)
-				ui.Text(c, "("+status+")").FontSize(fsTiny).TextColor(color).Shrink(0)
+				if size := int64(num(file, "totalBytes")); size > 0 && boolOf(file, "ok") {
+					ui.Text(c, fmtBytes(size)).FontSize(fsTiny).TextColor(ink).Shrink(0).NoWrap()
+				}
+				status, color := transferFileStatus(c, file)
+				ui.Text(c, "· "+status).FontSize(fsTiny).TextColor(color).Shrink(0).NoWrap()
 			})
 			if message := str(file, "error"); message != "" {
 				uikit.ErrorText(c, message)
@@ -1940,19 +1956,16 @@ func (a *desktop) toolTransferBody(c *ui.Context, result map[string]any) {
 }
 
 // transferFileStatus keeps every outcome on the row it belongs to: a mapping
-// that ran reports its bytes, one that never ran says so instead of reading
-// like a failure, and only a real failure takes the danger color. The words are
-// the result fields the tool itself writes, so a card never disagrees with the
+// that ran is "ok", one that never ran says so instead of reading like a
+// failure, and only a real failure takes the danger color. The words are the
+// result fields the tool itself writes, so a card never disagrees with the
 // payload behind it.
-func transferFileStatus(c *ui.Context, file map[string]any, ink ui.Color) (string, ui.Color) {
+func transferFileStatus(c *ui.Context, file map[string]any) (string, ui.Color) {
 	switch {
 	case boolOf(file, "ok"):
-		if size := int64(num(file, "totalBytes")); size > 0 {
-			return "ok · " + fmtBytes(size), ink
-		}
-		return "ok", ink
+		return "ok", c.Theme().Success
 	case boolOf(file, "skipped"):
-		return "skipped", ink
+		return "skipped", c.Theme().TextMuted
 	default:
 		return "failed", c.Theme().Danger
 	}
