@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -44,6 +45,59 @@ func TestFetchAutomaticResponse(t *testing.T) {
 	response, ok := result.Data.(HTTPRequestToolResult)
 	if !result.OK || !ok || response.Body != `{"ok":true}` {
 		t.Fatalf("response: %#v", result)
+	}
+}
+
+func TestFetchSaveToRequiresCompleteSuccessfulResponseAndConsent(t *testing.T) {
+	var requests atomic.Int32
+	const payload = "replacement"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		switch r.URL.Path {
+		case "/missing":
+			w.WriteHeader(http.StatusNotFound)
+		case "/partial":
+			w.WriteHeader(http.StatusPartialContent)
+		}
+		_, _ = io.WriteString(w, payload)
+	}))
+	defer server.Close()
+	a := newIsolatedTestApp(t)
+	cfg := webFetchTestConfig()
+	cfg.Workspace = t.TempDir()
+	path := filepath.Join(cfg.Workspace, "existing.txt")
+	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	call := func(endpoint, fields string) toolResult {
+		return a.executeTool(t.Context(), cfg, "download", "fetch", []byte(fmt.Sprintf(`{"url":%q,%s}`, server.URL+endpoint, fields)))
+	}
+	for _, tc := range []struct{ endpoint, fields, code string }{
+		{"/ok", `"method":"POST","saveTo":"existing.txt"`, "E_EXISTS"},
+		{"/ok", `"saveTo":"existing.txt","Overwrite":true`, "E_EXISTS"},
+		{"/missing", `"saveTo":"existing.txt","overwrite":true`, "E_HTTP_SAVE_STATUS"},
+		{"/partial", `"saveTo":"existing.txt","overwrite":true`, "E_HTTP_SAVE_STATUS"},
+		{"/ok", `"saveTo":"existing.txt","overwrite":true,"maxBytes":4`, "E_HTTP_SAVE_TRUNCATED"},
+	} {
+		if got := call(tc.endpoint, tc.fields); got.OK || got.ErrorCode != tc.code {
+			t.Fatalf("%s %s: %+v", tc.endpoint, tc.fields, got)
+		}
+		if data, err := os.ReadFile(path); err != nil || string(data) != "original" {
+			t.Fatalf("download changed destination: %q, %v", data, err)
+		}
+	}
+	if got := requests.Load(); got != 3 {
+		t.Fatalf("invalid destinations must be refused before requesting: %d requests", got)
+	}
+	for _, dest := range []string{"existing.txt", "nested/new.txt"} {
+		got := call("/ok", fmt.Sprintf(`"saveTo":%q,"overwrite":%t`, dest, dest == "existing.txt"))
+		result, ok := got.Data.(HTTPRequestToolResult)
+		if !got.OK || !ok || result.SavedPath != dest || result.Body != "" {
+			t.Fatalf("save %s: %+v", dest, got)
+		}
+		if data, err := os.ReadFile(filepath.Join(cfg.Workspace, dest)); err != nil || string(data) != payload {
+			t.Fatalf("save %s: %q, %v", dest, data, err)
+		}
 	}
 }
 
@@ -1971,32 +2025,22 @@ type commandSafetyCase struct {
 	// command 是字面命令；需要按临时目录拼路径时改填 build。
 	command string
 	build   func(t *testing.T, workspace, outside string) string
-	cwd     string
 	// wantCode 为空表示期望放行。
 	wantCode string
 	// wantText 是错误文本必须同时出现的片段（围栏每条拒绝都要说清原因与指路）。
 	wantText []string
 }
 
-// fenceCommandForTest 走生产调用点的同一段路：runCommandWithConfig 与 orch_services
-// 都是先把请求里的 cwd 解析出来，再进围栏唯一入口 checkCommandSafetyAtCwd（围栏不再
-// 自己解析 cwd，那层兼容包装已删除）。测试照做，用例表与断言一字不改。
+// fenceCommandForTest 走生产调用点的同一段路：命令固定在工作区根目录启动，
+// 进围栏唯一入口 checkCommandSafetyAtCwd。
 func fenceCommandForTest(t *testing.T, req CommandRequest, roots []string) error {
 	t.Helper()
-	workingDir := roots[0]
-	if strings.TrimSpace(req.Cwd) != "" {
-		resolved, err := resolveCommandCwd(roots, req.Cwd)
-		if err != nil {
-			return err
-		}
-		workingDir = resolved
-	}
-	return checkCommandSafetyAtCwd(req, roots, workingDir)
+	return checkCommandSafetyAtCwd(req, roots, roots[0])
 }
 
 // TestCommandSafetyFence 是命令围栏的全表：放行的一类（读区外、命令里的关键词只是
 // 数据、heredoc 正文、动态目标），拦截的一类（显式删除、高危语义、改动区外已存在的
-// 目标、工作区软链穿透、相对路径按 cwd 解析后越界）。
+// 目标、工作区软链穿透、相对路径越界）。
 func TestCommandSafetyFence(t *testing.T) {
 	t.Parallel()
 	cases := []commandSafetyCase{
@@ -2094,7 +2138,7 @@ func TestCommandSafetyFence(t *testing.T) {
 			if tc.build != nil {
 				command = tc.build(t, workspace, outside)
 			}
-			err := fenceCommandForTest(t, CommandRequest{Command: command, Cwd: tc.cwd}, []string{workspace})
+			err := fenceCommandForTest(t, CommandRequest{Command: command}, []string{workspace})
 			if tc.wantCode == "" {
 				if err != nil {
 					t.Fatalf("command %q should be allowed: %v", command, err)
@@ -2113,26 +2157,21 @@ func TestCommandSafetyFence(t *testing.T) {
 	}
 }
 
-// 相对路径按 cwd 解析后越界、以及工作区软链穿透，这两条要各自准备目录/链接，
+// 相对路径越界、以及工作区软链穿透，这两条要各自准备目录/链接，
 // 单独留在表外：它们考的是"解析基准"，不是命令串本身。
-func TestCommandSafetyResolvesTargetsAgainstCwdAndSymlinks(t *testing.T) {
+func TestCommandSafetyResolvesRelativeTargetAndSymlinks(t *testing.T) {
 	workspace := t.TempDir()
 	outside := t.TempDir()
 
-	cwd := filepath.Join(workspace, "build")
-	if err := os.MkdirAll(cwd, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	target := writeOutsideFile(t, outside, "existing.txt")
-	relative, err := filepath.Rel(cwd, target)
+	relative, err := filepath.Rel(workspace, target)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if code := toolErrorCode(fenceCommandForTest(t, CommandRequest{
 		Command: fmt.Sprintf(`touch %q`, filepath.ToSlash(relative)),
-		Cwd:     "build",
 	}, []string{workspace})); code != "E_PATH_OUTSIDE" {
-		t.Fatalf("relative mutation must resolve from cwd and be blocked, got %q", code)
+		t.Fatalf("relative mutation must resolve from the workspace root and be blocked, got %q", code)
 	}
 
 	if runtime.GOOS == "windows" {
@@ -2267,31 +2306,6 @@ func TestRunCommandWithGitBashResolvesWindowsToolchainAndShellExpansion(t *testi
 		if !strings.Contains(result.Output, want) {
 			t.Fatalf("expected output to contain %q, got %q", want, result.Output)
 		}
-	}
-}
-
-func TestRunCommandRejectsCwdSymlinkOutsideWorkspace(t *testing.T) {
-	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink creation requires privileges on many Windows environments")
-	}
-	root := t.TempDir()
-	outside := t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
-		t.Fatal(err)
-	}
-	app := newIsolatedTestApp(t)
-
-	args, err := json.Marshal(CommandRequest{Command: "pwd", Cwd: "escape"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	result := app.executeTool(context.Background(), ConfigState{Workspace: root}, "session-1", "command", args)
-	if result.OK {
-		t.Fatalf("expected command to reject outside symlink cwd, got %#v", result)
-	}
-	if result.ErrorCode != "E_PATH_OUTSIDE" {
-		t.Fatalf("expected E_PATH_OUTSIDE, got %#v", result)
 	}
 }
 
@@ -2727,13 +2741,15 @@ func TestExecuteToolAppliesOriginalSnapshotTextChanges(t *testing.T) {
 	}
 }
 
-// Missing or removed source parameters cannot trigger writes.
+// Missing or empty source parameters cannot trigger writes. A stray key is a
+// different matter: it is dropped with a warning, so an invented parameter costs
+// no round trip, and dropping a removed scope key cannot widen the edit either
+// (an ambiguous oldText is refused by the unique-match rule).
 func TestExecuteToolRejectsRemovedOrMissingEditParameters(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
 		"missing source": `{"newText":""}`,
 		"empty source":   `{"oldText":"","newText":"ALPHA","replaceAll":true}`,
-		"removed scope":  `{"oldText":"alpha","lineRange":{"start":2},"newText":"ALPHA"}`,
 	}
 	for name, change := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -2747,12 +2763,8 @@ func TestExecuteToolRejectsRemovedOrMissingEditParameters(t *testing.T) {
 			if result.OK {
 				t.Fatalf("the call must be refused, got %#v", result)
 			}
-			want := "oldText"
-			if name == "removed scope" {
-				want = "lineRange"
-			}
-			if !strings.Contains(result.Error, want) {
-				t.Fatalf("rejection %q must mention %q", result.Error, want)
+			if !strings.Contains(result.Error, "oldText") {
+				t.Fatalf("rejection %q must mention oldText", result.Error)
 			}
 			got, err := os.ReadFile(filepath.Join(dir, "sample.txt"))
 			if err != nil {
@@ -2762,6 +2774,29 @@ func TestExecuteToolRejectsRemovedOrMissingEditParameters(t *testing.T) {
 				t.Fatalf("a refused edit changed the file: %q", got)
 			}
 		})
+	}
+
+	// A parameter the declaration does not carry is dropped and named in a
+	// warning; the edit itself still applies, which is the whole point of
+	// tolerating it instead of spending a round trip.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sample.txt"), []byte("alpha\nbeta\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := `{"path":"sample.txt","changes":[{"oldText":"alpha","lineRange":{"start":2},"newText":"ALPHA"}]}`
+	result := newIsolatedTestApp(t).executeTool(context.Background(), ConfigState{Workspace: dir}, "session-1", "edit", []byte(args))
+	if !result.OK {
+		t.Fatalf("a stray parameter must not fail the edit, got %#v", result)
+	}
+	if len(result.Warnings) == 0 || !strings.Contains(strings.Join(result.Warnings, " "), "lineRange") {
+		t.Fatalf("expected the dropped key to be named, got %#v", result.Warnings)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "sample.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "ALPHA\nbeta\n" {
+		t.Fatalf("the edit did not apply alongside the warning: %q", got)
 	}
 }
 
@@ -3433,6 +3468,18 @@ func TestNormalizeToolArgsForDedup(t *testing.T) {
 			a:    `{"query":{"a":"1","b":"2"}}`,
 			b:    `{"query":{"b":"2","a":"1"}}`,
 			want: true,
+		},
+		{
+			name: "distinct large integers",
+			a:    `{"json":{"n":9007199254740992}}`,
+			b:    `{"json":{"n":9007199254740993}}`,
+			want: false,
+		},
+		{
+			name: "trailing JSON is not discarded",
+			a:    `{"url":"https://x"} {}`,
+			b:    `{"url":"https://x"}`,
+			want: false,
 		},
 		{
 			name: "empty strings",

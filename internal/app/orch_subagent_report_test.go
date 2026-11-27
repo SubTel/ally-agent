@@ -23,11 +23,10 @@ import (
 	openai "github.com/sashabaranov/go-openai"
 )
 
-// subagentReportRequest is the decoded body of one sub-agent model request, kept
-// to the two fields the report contract is about: the declared tools (they must
-// survive the exhausted budget, or the prompt prefix forks at the first token)
-// and the message sequence (append-only, so retries read the cache).
+// subagentReportRequest records the model route and the tools/messages that
+// must preserve their prefix across report turns.
 type subagentReportRequest struct {
+	Model    string                         `json:"model"`
 	Tools    []openai.Tool                  `json:"tools"`
 	Messages []openai.ChatCompletionMessage `json:"messages"`
 }
@@ -60,6 +59,12 @@ func newSubagentReportHarness(t *testing.T, replies ...string) *subagentReportHa
 		reply := subagentTextReply("unscripted reply")
 		if index < len(h.script) {
 			reply = h.script[index]
+		}
+		if reply == overflowLengthError {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, reply)
+			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -124,7 +129,7 @@ func TestForceSubagentFinalReportKeepsToolsAndRetriesDiscardedCalls(t *testing.T
 	run := &SubagentRun{ID: "sub-report"}
 	history := []openai.ChatCompletionMessage{{Role: openai.ChatMessageRoleUser, Content: "## Task\nwrite marker.txt"}}
 
-	summary, err := app.forceSubagentFinalReport(context.Background(), cfg, "test-model", history, tools, run)
+	summary, err := app.forceSubagentFinalReport(context.Background(), cfg, history, tools, run, newSubagentCompaction(history, 0, tools))
 	if err != nil {
 		t.Fatalf("forceSubagentFinalReport() error = %v", err)
 	}
@@ -181,8 +186,8 @@ func TestForceSubagentFinalReportRetriesAnEmptyAnswer(t *testing.T) {
 	cfg := subagentReportBaseConfig(harness.server.URL, t.TempDir())
 	tools := []openai.Tool{subagentReportTool("read")}
 
-	summary, err := app.forceSubagentFinalReport(context.Background(), cfg, "test-model",
-		[]openai.ChatCompletionMessage{{Role: openai.ChatMessageRoleUser, Content: "## Task\ndo it"}}, tools, &SubagentRun{ID: "sub-empty"})
+	history := []openai.ChatCompletionMessage{{Role: openai.ChatMessageRoleUser, Content: "## Task\ndo it"}}
+	summary, err := app.forceSubagentFinalReport(context.Background(), cfg, history, tools, &SubagentRun{ID: "sub-empty"}, newSubagentCompaction(history, 0, tools))
 	if err != nil {
 		t.Fatalf("forceSubagentFinalReport() error = %v", err)
 	}
@@ -214,8 +219,8 @@ func TestForceSubagentFinalReportGivesUpAfterBoundedTurns(t *testing.T) {
 	cfg := subagentReportBaseConfig(harness.server.URL, t.TempDir())
 	tools := []openai.Tool{subagentReportTool("read")}
 
-	summary, err := app.forceSubagentFinalReport(context.Background(), cfg, "test-model",
-		[]openai.ChatCompletionMessage{{Role: openai.ChatMessageRoleUser, Content: "## Task\ndo it"}}, tools, &SubagentRun{ID: "sub-stuck"})
+	history := []openai.ChatCompletionMessage{{Role: openai.ChatMessageRoleUser, Content: "## Task\ndo it"}}
+	summary, err := app.forceSubagentFinalReport(context.Background(), cfg, history, tools, &SubagentRun{ID: "sub-stuck"}, newSubagentCompaction(history, 0, tools))
 	if !errors.Is(err, errForcedReportMissing) {
 		t.Fatalf("forceSubagentFinalReport() error = %v, want errForcedReportMissing", err)
 	}
@@ -250,7 +255,6 @@ func TestSubagentBudgetExhaustionNeverRunsDiscardedToolCalls(t *testing.T) {
 		Task:         "write marker.txt",
 		CleanContext: true,
 		MaxSteps:     1,
-		Model:        "test-model",
 		tools:        tools,
 	})
 	if err != nil {

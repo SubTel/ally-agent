@@ -530,10 +530,6 @@ func planDeletePath(roots []string, requestPath string, recursive bool) (planned
 		}
 	}
 
-	if info != nil && info.IsDir() && isVCSDeleteName(filepath.Base(path)) {
-		return plannedDeletePath{}, codedToolError("E_DELETE_BLOCKED", errors.New("refusing to delete version control directory"))
-	}
-
 	// Safety: block dangerous delete targets
 	if blocked, reason := isDangerousDeletePath(path); blocked {
 		return plannedDeletePath{}, codedToolError("E_DELETE_BLOCKED", fmt.Errorf("%s\n\nThis operation has been blocked for safety. If you really need to delete this path, do it manually outside the agent.", reason))
@@ -562,12 +558,12 @@ func planDeletePath(roots []string, requestPath string, recursive bool) (planned
 }
 
 func (a *App) runCommandWithConfig(parent context.Context, cfg ConfigState, req CommandRequest) (CommandResult, error) {
-	return a.runCommandWithTimer(parent, cfg, req, nil)
+	return a.runCommandWithTimer(parent, cfg, req, true, nil)
 }
 
 // A supplied deadline channel lets process integration tests signal timeout
 // after observing child readiness. Normal callers use the request's real timer.
-func (a *App) runCommandWithTimer(parent context.Context, cfg ConfigState, req CommandRequest, timeoutC <-chan time.Time) (CommandResult, error) {
+func (a *App) runCommandWithTimer(parent context.Context, cfg ConfigState, req CommandRequest, promoteOnTimeout bool, timeoutC <-chan time.Time) (CommandResult, error) {
 	defer a.invalidateGitStatus(cfg.Workspace)
 	if strings.TrimSpace(req.Command) == "" {
 		return CommandResult{}, codedToolError("E_BAD_COMMAND", errors.New("command is required"))
@@ -578,12 +574,6 @@ func (a *App) runCommandWithTimer(parent context.Context, cfg ConfigState, req C
 	}
 	root := roots[0]
 	cwd := root
-	if strings.TrimSpace(req.Cwd) != "" {
-		cwd, err = resolveCommandCwd(roots, req.Cwd)
-		if err != nil {
-			return CommandResult{}, err
-		}
-	}
 	// 围栏是命令安全的唯一入口。
 	if err := checkCommandSafetyAtCwd(req, roots, cwd); err != nil {
 		return CommandResult{}, err
@@ -596,9 +586,8 @@ func (a *App) runCommandWithTimer(parent context.Context, cfg ConfigState, req C
 	if timeout > 600 {
 		timeout = 600
 	}
-	// 超时不再用 context.WithTimeout 杀进程：命令超时后会被收编为后台服务
-	// 继续运行（promoteTimedOutCommand），重启 dev server 会撞端口，收编
-	// 原进程才能无缝接管。取消（ESC/关闭运行）仍然走 parent ctx 杀树。
+	// Interactive calls may hand the running process to the service manager.
+	// Keep that timer separate from cancellation, which stops the process tree.
 	runCtx, cancel := context.WithCancel(parent)
 	defer cancel()
 	if timeoutC == nil {
@@ -724,6 +713,16 @@ func (a *App) runCommandWithTimer(parent context.Context, cfg ConfigState, req C
 		select {
 		case err = <-waitDone:
 		case <-timeoutC:
+			if !promoteOnTimeout {
+				timedOut = true
+				// Stop the tree even if the shell exited but a child is still
+				// holding the output pipe open.
+				if stopProcessTree(cmd.Process.Pid) != nil {
+					cancel()
+				}
+				err = <-waitDone
+				break
+			}
 			// 超时收编：进程还活着（waitDone 未关），把原进程连同输出管道
 			// 一起移交给服务注册表，避免杀掉重跑撞 EADDRINUSE。
 			info, promoteErr := a.promoteTimedOutCommand(promoteCommandParams{
@@ -1458,31 +1457,6 @@ func resolveDeletablePath(roots []string, p string) (string, error) {
 	return abs, nil
 }
 
-func resolveCommandCwd(roots []string, p string) (string, error) {
-	abs, err := resolveBoundaryPath(roots, p)
-	if err != nil {
-		return "", outsideBoundaryError(roots, p, err)
-	}
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", codedToolError("E_CWD_INVALID", err)
-		}
-		return "", err
-	}
-	if !insideWriteRoot(roots, resolved) {
-		return "", codedToolError("E_PATH_OUTSIDE", fmt.Errorf("cwd resolves outside workspace or ~/.ally_agent: %s\n可写范围：%s", p, formatAllowedRoots(roots)))
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return "", err
-	}
-	if !info.IsDir() {
-		return "", codedToolError("E_CWD_INVALID", fmt.Errorf("cwd is not a directory: %s", p))
-	}
-	return filepath.Clean(resolved), nil
-}
-
 // formatAllowedRoots 把 roots 列表格式化为换行分隔的字符串，用于错误信息提示。
 func formatAllowedRoots(roots []string) string {
 	return pathutil.FormatAllowedRoots(roots)
@@ -1588,8 +1562,4 @@ func applyDeletePlanSlots(result *DeletePathsResult, plan deleteExecutionPlan, r
 		}
 		result.Paths = append(result.Paths, slot)
 	}
-}
-
-func isVCSDeleteName(name string) bool {
-	return name == ".git" || name == ".svn" || name == ".hg"
 }

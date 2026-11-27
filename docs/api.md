@@ -352,7 +352,7 @@ curl -H "Authorization: Bearer <token>" "http://127.0.0.1:47821/api/v1/sessions?
 
 ### `POST /api/v1/services` — 启动后台服务
 
-请求：`{ "name":"dev", "description":"项目开发服务", "command":"npm run dev", "cwd":".", "workspace":"/srv/project" }`。
+请求：`{ "name":"dev", "description":"项目开发服务", "command":"npm run dev", "workspace":"/srv/project" }`。服务固定在工作区根目录启动；需要子目录就把 `cd 子目录 && 命令` 写进 `command`。
 `description`、`command` 必填，`workspace` 缺省使用当前运行工作区；复用原有命令检查和路径边界。
 服务属于应用运行时，HTTP 请求结束或客户端断开不会结束它。响应为现有 `ServiceInfo`。
 
@@ -375,7 +375,7 @@ curl -H "Authorization: Bearer <token>" "http://127.0.0.1:47821/api/v1/sessions?
 
 ### `POST /api/v1/services/{id}/stop` — 停止后台服务
 
-请求体可省略。立即强制停止该服务所属的整个进程树，并等待退出确认；失败返回错误，不会假报已停止。请求体不接受参数，旧 `graceSeconds` 已移除。不存在返回 404。
+请求体可省略。立即强制终止服务所属的进程，不等待优雅退出。Windows 的 Job 句柄仍打开时会等待退出确认；Unix 发送 `SIGKILL` 后不额外等待。停止失败会返回错误。请求体不接受参数，旧 `graceSeconds` 已移除。不存在返回 404。
 
 ### `POST /api/v1/tasks` — 创建计划任务
 

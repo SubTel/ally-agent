@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -994,7 +995,6 @@ type DeletePathsResult struct {
 
 type CommandRequest struct {
 	Command string `json:"command"`
-	Cwd     string `json:"cwd"`
 	Timeout int    `json:"timeout"`
 }
 
@@ -1002,7 +1002,6 @@ type StartServiceRequest struct {
 	Name        string `json:"name,omitempty"`
 	Description string `json:"description"`
 	Command     string `json:"command"`
-	Cwd         string `json:"cwd,omitempty"`
 }
 
 type StopServiceRequest struct {
@@ -1015,7 +1014,6 @@ type BackgroundProcessRequest struct {
 	Name            string `json:"name,omitempty"`
 	Description     string `json:"description,omitempty"`
 	Command         string `json:"command,omitempty"`
-	Cwd             string `json:"cwd,omitempty"`
 	ID              string `json:"id,omitempty"`
 	TailBytes       int    `json:"tailBytes,omitempty"`
 }
@@ -1178,6 +1176,7 @@ type HTTPRequestToolRequest struct {
 	Body                string            `json:"body,omitempty"`
 	JSON                json.RawMessage   `json:"json,omitempty"`
 	SaveTo              string            `json:"saveTo,omitempty"`
+	Overwrite           bool              `json:"overwrite,omitempty"`
 	Timeout             int               `json:"timeout,omitempty"`
 	MaxBytes            int               `json:"maxBytes,omitempty"`
 	FollowRedirects     *bool             `json:"followRedirects,omitempty"`
@@ -1534,26 +1533,21 @@ func (f *PlanFinish) UnmarshalJSON(data []byte) error {
 type AgentDelegateRequest struct {
 	Task         string `json:"task"`
 	Role         string `json:"role"`
-	Name         string `json:"name,omitempty"`
-	Description  string `json:"description,omitempty"`
 	CleanContext bool   `json:"cleanContext,omitempty"`
-	Model        string `json:"model,omitempty"`
 	MaxSteps     int    `json:"maxSteps,omitempty"`
+	description  string // Internal label for scheduled runs.
 	tools        []openai.Tool
 }
 
 type AgentDelegateResult struct {
 	AgentID     string   `json:"agentId"`
-	Name        string   `json:"name,omitempty"`
 	Role        string   `json:"role"`
-	Description string   `json:"description"`
 	Status      string   `json:"status"`
 	StopReason  string   `json:"stopReason,omitempty"`
 	Steps       int      `json:"steps"`
 	Summary     string   `json:"summary"`
 	FilesRead   []string `json:"filesRead,omitempty"`
 	FilesEdited []string `json:"filesEdited,omitempty"`
-	Model       string   `json:"model"`
 	Error       string   `json:"error,omitempty"`
 }
 
@@ -2501,7 +2495,7 @@ func (a *App) runChat(ctx context.Context, runID string, req ChatRequest, cfg Co
 			// reason="overflow" + willRetry)，压缩后请求不再超窗、run 得以继续。
 			// 压缩本身也失败时(压缩请求用同一份历史、同一个模型，超窗时它同样会
 			// 失败)把两条原因一起报出来，用户才知道只能删历史自救。
-			if !overflowCompacted && !emittedEvents && classifyLLMError(err) == llmErrorKindContextTooLong {
+			if shouldRecoverContextOverflow(err, emittedEvents, overflowCompacted) {
 				overflowCompacted = true
 				requestTrigger = "overflow_recovery"
 				newMessages, payload, compactErr := a.compactRunHistory(ctx, cfg, sessionID, compactReasonOverflow, req, messages, usedTokens)
@@ -2797,6 +2791,13 @@ func (a *App) executeTool(ctx context.Context, cfg ConfigState, sessionID, name 
 	ctx = withToolWorkspace(ctx, cfg.Workspace)
 	finishPerfTool := startPerfTool(ctx, name, args)
 	defer finishPerfTool()
+	// Registered before the panic guard so it runs after it: a panic becomes a
+	// normal error result, and this record then carries it like any other failure.
+	defer func() {
+		if !result.OK {
+			a.logToolFailure(sessionID, name, args, result)
+		}
+	}()
 	// Tool execution digests model-controlled JSON and is the single choke
 	// point for the main loop, sub-agents, and scheduled tasks. A panic in
 	// any handler would otherwise crash the whole desktop app — and in the
@@ -2935,7 +2936,6 @@ func (a *App) executeTool(ctx context.Context, cfg ConfigState, sessionID, name 
 					Name:        req.Name,
 					Description: req.Description,
 					Command:     req.Command,
-					Cwd:         req.Cwd,
 				})
 			case "stop":
 				if err = a.checkServiceWorkspace(cfg, req.ID); err == nil {
@@ -2994,7 +2994,7 @@ func (a *App) executeTool(ctx context.Context, cfg ConfigState, sessionID, name 
 			normalized, repaired := normalizeJSONBodyArg(req.JSON)
 			req.JSON = normalized
 			if repaired {
-				argWarnings = append(argWarnings, "参数 json 应为 JSON 对象/数组，却收到了带引号的字符串，已自动修复并照常执行；后续调用请直接传 JSON 对象，不要序列化成字符串。")
+				argWarnings = append(argWarnings, "参数 json 应为 JSON 对象，却收到了带引号的字符串，已自动修复并照常执行；后续调用请直接传 JSON 对象，不要序列化成字符串。")
 			}
 		}
 		if err == nil {
@@ -3002,6 +3002,10 @@ func (a *App) executeTool(ctx context.Context, cfg ConfigState, sessionID, name 
 				data, err = a.httpRequestToolWithConfig(ctx, cfg, req)
 			} else {
 				data, err = a.fetchToolWithConfig(ctx, cfg, req)
+			}
+			if response, ok := data.(HTTPRequestToolResult); err == nil && ok && response.SavedPath != "" {
+				a.invalidateWorkspaceMapCache(cfg)
+				a.invalidateGitStatus(cfg.Workspace)
 			}
 		}
 	case "web_fetch":
@@ -3984,12 +3988,38 @@ func decodeToolArguments(name string, args []byte, v any) (error, []string) {
 		}
 		return toolArgDecodeError(name, rawArgs, err), nil
 	}
-	// Unmarshal into the actual target (allows unknown fields). Type errors
-	// trigger one repair round per offending field path: double-encoded
-	// string fields are decoded in place, so a recoverable formatting slip
-	// does not waste a model round trip.
-	var repairedFields []string
+	schema, builtin := toolshared.BuiltinSchema(name)
 	cur := rawArgs
+	var ignored []string
+	if builtin && schema["additionalProperties"] == false {
+		properties, _ := schema["properties"].(map[string]any)
+		for key := range rawMap {
+			if _, known := properties[key]; !known {
+				delete(rawMap, key)
+				ignored = append(ignored, key)
+			}
+		}
+		if len(ignored) > 0 {
+			// Filter before Go's case-insensitive struct decode can bind an
+			// undeclared key. Preserve raw values such as the fetch JSON body.
+			var filtered bytes.Buffer
+			filtered.WriteByte('{')
+			for key, value := range rawMap {
+				if filtered.Len() > 1 {
+					filtered.WriteByte(',')
+				}
+				quoted, _ := json.Marshal(key)
+				filtered.Write(quoted)
+				filtered.WriteByte(':')
+				filtered.Write(value)
+			}
+			filtered.WriteByte('}')
+			cur = filtered.Bytes()
+			sort.Strings(ignored)
+		}
+	}
+	// Decode into the target, repairing double-encoded values as needed.
+	var repairedFields []string
 	if name == "fetch" || name == "http_request" {
 		if fixed, ok := repairHTTPRequestJSONArg(cur); ok {
 			cur = fixed
@@ -4032,14 +4062,15 @@ func decodeToolArguments(name string, args []byte, v any) (error, []string) {
 	// repair above still lands, and so every keyword the declaration uses
 	// (required, ranges, patterns, enum, const) is enforced exactly as written.
 	//
-	// Undeclared keys are normally dropped with a warning. Edits reject them:
-	// silently ignoring a removed constraint could change the replacement scope.
-	if schema, ok := toolshared.BuiltinSchema(name); ok {
+	// Undeclared keys never reach a handler, so they are collected into one
+	// warning: refusing the call cost a round trip for a value nothing reads.
+	// A removed constraint cannot silently widen a write either, because the
+	// required fields it should have narrowed (oldText) still have to match.
+	if builtin {
 		violations := schemautil.ValidateArgs(schema, cur)
-		ignored := make([]string, 0, len(violations))
 		fatal := make([]schemautil.Violation, 0, len(violations))
 		for _, violation := range violations {
-			if violation.UnsupportedKey == "" || name == "edit" || name == "remote_edit" {
+			if violation.UnsupportedKey == "" {
 				fatal = append(fatal, violation)
 				continue
 			}
@@ -4049,7 +4080,7 @@ func decodeToolArguments(name string, args []byte, v any) (error, []string) {
 			return codedToolError("E_BAD_ARGS", fmt.Errorf("invalid arguments for %s: %s", name, schemautil.DescribeViolations(fatal))), nil
 		}
 		if len(ignored) > 0 {
-			warnings = append(warnings, fmt.Sprintf("以下参数不被该工具支持，已忽略：%s", strings.Join(ignored, ", ")))
+			warnings = append(warnings, fmt.Sprintf("以下参数不被该工具支持，已忽略：%s", strings.Join(ignored[:min(len(ignored), schemautil.MaxReportedViolations)], ", ")))
 		}
 		return nil, warnings
 	}
