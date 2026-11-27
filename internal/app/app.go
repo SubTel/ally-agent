@@ -380,6 +380,11 @@ type App struct {
 	// nil uses the production timer and preserves Retry-After/backoff policy.
 	retryWait func(context.Context, time.Duration) error
 
+	// Optional stand-in for the update path's stopAllServicesWithError. Update
+	// tests cannot spawn a service that refuses to die, so they inject the
+	// failure here; nil uses the real stop path.
+	stopServicesStub func() error
+
 	// liveBreakdown caches the full token-count breakdown for active sessions.
 	// Updated by runChat each agent step. Maps sessionID → ContextBreakdown.
 	liveBreakdown      map[string]ContextBreakdown
@@ -1161,6 +1166,9 @@ type CommandResult struct {
 	// PromotedToService 标记命令超时后已收编为后台服务：进程未死、端口未
 	// 释放，模型应改用 service 工具交互而不是重跑命令。
 	PromotedToService bool `json:"promotedToService,omitempty"`
+	// ServiceID 是收编后后台服务的 ID，调度器用它阻止同一定时任务在
+	// 服务仍存活时再次并发执行。
+	ServiceID string `json:"serviceId,omitempty"`
 }
 
 type HTTPRequestToolRequest struct {

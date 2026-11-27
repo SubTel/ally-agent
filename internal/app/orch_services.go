@@ -715,6 +715,63 @@ func (a *App) stopAllServices() {
 	_ = a.stopAllServicesWithError()
 }
 
+// stopAllServicesForUpdate is the update path's stop step: its failure must
+// abort the install instead of being swallowed, because replacing files under
+// an unconfirmed process tree corrupts the installation.
+func (a *App) stopAllServicesForUpdate() error {
+	if a.stopServicesStub != nil {
+		return a.stopServicesStub()
+	}
+	return a.stopAllServicesWithError()
+}
+
+// promotedServiceAlive reports whether the promoted background service is
+// still starting or running, so a scheduled task it came from must not re-run
+// concurrently.
+func (a *App) promotedServiceAlive(id string) bool {
+	a.servicesMu.Lock()
+	defer a.servicesMu.Unlock()
+	service := a.services[id]
+	if service == nil {
+		return false
+	}
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	return service.info.Status == "starting" || service.info.Status == "running"
+}
+
+// HasActiveServiceUnder reports whether an active (starting/running) service
+// keeps its working directory inside root. A temp-workspace directory with a
+// live service must survive its tab: the service deliberately outlives the
+// conversation that started it.
+func (a *App) HasActiveServiceUnder(root string) bool {
+	root = filepath.Clean(root)
+	if os.PathSeparator == '\\' {
+		root = strings.ToLower(root)
+	}
+	a.servicesMu.Lock()
+	defer a.servicesMu.Unlock()
+	for _, service := range a.services {
+		if service == nil {
+			continue
+		}
+		service.mu.Lock()
+		status, cwd := service.info.Status, service.info.Cwd
+		service.mu.Unlock()
+		if status != "starting" && status != "running" || strings.TrimSpace(cwd) == "" {
+			continue
+		}
+		inside := filepath.Clean(strings.TrimSpace(cwd))
+		if os.PathSeparator == '\\' {
+			inside = strings.ToLower(inside)
+		}
+		if rel, err := filepath.Rel(root, inside); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) stopAllServicesWithError() error {
 	a.servicesStartMu.Lock()
 	defer a.servicesStartMu.Unlock()
@@ -992,6 +1049,7 @@ func (a *App) promotedCommandResult(req CommandRequest, shell shellInvocation, c
 		OutputFilePath:    outputFilePath,
 		OutputFileBytes:   outputFileSize,
 		PromotedToService: true,
+		ServiceID:         info.ID,
 	}
 	result.Output += fmt.Sprintf("\n\n[命令在 %d 秒内未退出，已转为后台服务继续运行（未杀进程，端口/状态保持不变）]\n服务 ID: %s\n用 service 工具继续交互：action=read 查看输出（dev server ready 日志通常在尾部）、action=restart 重启、action=stop 停止、action=list 查看；任务中心面板也能看到该服务。若这本来就该是一次性命令，请 action=stop 停掉后自行修复超时问题。", timeout, info.ID)
 	return result

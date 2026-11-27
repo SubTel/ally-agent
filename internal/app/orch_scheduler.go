@@ -137,6 +137,9 @@ type scheduledTaskManager struct {
 	runSem     chan struct{}
 	stopped    bool
 	workers    sync.WaitGroup
+	// promoted 记录定时命令超时后收编的服务 ID：服务仍存活时同一任务
+	// 不得再次触发，否则新旧执行会同时写同一输出或争用同一端口。
+	promoted map[string]string
 }
 
 type scheduledTaskEvent struct {
@@ -164,6 +167,7 @@ func (a *App) startScheduledTaskManager() error {
 		schedules: map[string]cron.Schedule{},
 		cancels:   map[string]context.CancelFunc{},
 		runSem:    make(chan struct{}, 1),
+		promoted:  map[string]string{},
 	}
 	loadErr := manager.load()
 	manager.cron.Start()
@@ -569,6 +573,7 @@ func (m *scheduledTaskManager) unregisterLocked(id string) {
 		delete(m.timers, id)
 	}
 	delete(m.schedules, id)
+	delete(m.promoted, id)
 }
 
 func (m *scheduledTaskManager) trigger(id string) {
@@ -589,6 +594,24 @@ func (m *scheduledTaskManager) trigger(id string) {
 		m.mu.Unlock()
 		m.flushEvents()
 		return
+	}
+	if svcID := m.promoted[id]; svcID != "" {
+		if m.app.promotedServiceAlive(svcID) {
+			// The timed-out command still lives as a background service: skip
+			// this run instead of starting a second writer on the same output
+			// or port. The mapping is dropped once the service is gone.
+			m.advanceNextRunLocked(task, time.Now())
+			task.LastStatus = "skipped"
+			task.LastError = "previous execution still runs as background service " + svcID
+			task.UpdatedAt = time.Now().UnixMilli()
+			_ = m.persistLocked()
+			copyTask := cloneScheduledTask(task)
+			m.queueEventLocked("scheduled:update", map[string]any{"task": copyTask})
+			m.mu.Unlock()
+			m.flushEvents()
+			return
+		}
+		delete(m.promoted, id)
 	}
 	select {
 	case m.runSem <- struct{}{}:
@@ -786,9 +809,17 @@ func (m *scheduledTaskManager) runCommandTask(task ScheduledTask, ctx context.Co
 		errText = runErr.Error()
 	case result.PromotedToService:
 		// 超时命令已被收编为后台服务继续运行：任务本身没失败，但也没等到
-		// 退出。标记 timed_out 并在摘要里指向服务，便于事后诊断。
+		// 退出。标记 timed_out 并在摘要里指向服务，便于事后诊断；登记服务
+		// ID 让下一次触发在服务存活时跳过，而不是并发重跑。
 		status = "timed_out"
 		errText = fmt.Sprintf("command exceeded %ds; promoted to background service (still running)", timeout)
+		if result.ServiceID != "" {
+			// worker goroutine 不持 m.mu：登记必须加锁，否则与 trigger 的
+			// 读取、unregisterLocked 的删除构成并发 map 访问的致命竞态。
+			m.mu.Lock()
+			m.promoted[task.ID] = result.ServiceID
+			m.mu.Unlock()
+		}
 	case result.TimedOut:
 		status = "timed_out"
 		errText = fmt.Sprintf("command exceeded %ds", timeout)
